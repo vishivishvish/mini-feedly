@@ -1,20 +1,62 @@
 # miniFeedly
 
-Minimal, always-on news digest pipeline.
+Minimal, always-on AI news digest. Fetches Google News RSS for a keyword,
+keeps only articles from the previous day through today, resolves each
+Google News redirect link to the real publisher URL, fetches the article
+text, summarizes it with an LLM, and emails a dark-themed digest.
 
-`fetch_digest.py` pulls the Google News RSS feed for a keyword and prints a
-plain-text digest (title, source, link, published date per item).
+## Deployed pipeline: Google Apps Script (`miniFeedly.gs`)
 
-## Usage
+This is what actually runs daily. It lives in a Google Apps Script project
+(not this repo directly - paste `miniFeedly.gs` into the Apps Script editor),
+scheduled via a time-driven trigger.
 
-```bash
-python3 fetch_digest.py "Artificial Intelligence" 15
-```
+Pipeline per run:
+1. Fetch Google News RSS for `KEYWORD`, filter to items published in the
+   previous-day-to-today UTC window, cap at `MAX_ITEMS`.
+2. Resolve each Google News redirect link to the real publisher URL via
+   Google's internal `batchexecute` RPC (no browser needed - works from a
+   headless script).
+3. Fetch each real article's page and strip it down to plain text. Some
+   publishers (paywalled or bot-blocking) will fail here - expected, not
+   an error.
+4. Summarize the article text into a 1-2 sentence description, rotating
+   randomly across two LLM providers (xAI, OpenAI) per article, falling
+   back to the other provider if one fails. Any provider failures are
+   surfaced in the email itself, not swallowed.
+5. Email the digest as a dark "command center" styled HTML dashboard
+   (`composeDigestEmailHtml`), with a plain-text fallback body.
 
-Args: keyword (default "Artificial Intelligence"), max items (default 15).
+### One-time setup
 
-## Cloud routine
+1. Get API keys: [xAI](https://console.x.ai) and [OpenAI](https://platform.openai.com).
+2. In the Apps Script project: **Project Settings > Script Properties**,
+   add `XAI_API_KEY` and `OPENAI_API_KEY`.
+3. **Project Settings > Time zone** -> set to `Asia/Calcutta` (so a "9am"
+   trigger means 9am IST, not UTC).
+4. Run `runDailyDigest` once manually to authorize permissions (external
+   requests + send email).
+5. **Triggers (clock icon) > Add Trigger** -> function `runDailyDigest`,
+   Time-driven, Day timer, 9am-10am.
 
-A scheduled cloud agent runs this script daily and emails the digest via
-the Gmail MCP connector. Add more feeds/keywords by running the script
-multiple times with different keywords and concatenating the output.
+### Config constants (top of `miniFeedly.gs`)
+
+- `KEYWORD` - search keyword (default `"Artificial Intelligence"`)
+- `MAX_ITEMS` - max articles per digest (default 10)
+- `RECIPIENT_EMAIL` - who gets the email
+- `XAI_MODEL` / `OPENAI_MODEL` - model IDs used for summarization
+
+## Reference implementation: `fetch_digest.py`
+
+A Python port of the same fetch/filter/resolve/extract logic, runnable and
+tested locally (`python3 fetch_digest.py "Artificial Intelligence" 10`).
+It was the original prototype for the pipeline above and is kept here for
+local testing/reference - it is not what runs on a schedule. It prints a
+plain-text digest and saves each run's raw data to `Runs/run_<timestamp>.xml`
+(JSON content, `.xml` extension by design).
+
+## `email_preview.html`
+
+Standalone static preview of the HTML email's dark "command center" design,
+openable directly in a browser - useful for iterating on the email's look
+without needing to trigger a real run.

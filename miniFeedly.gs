@@ -1,0 +1,409 @@
+/**
+ * miniFeedly - Google Apps Script version
+ *
+ * Daily AI news digest: fetches Google News RSS for a keyword, keeps only
+ * articles from the previous day through today, resolves each Google News
+ * redirect link to the real publisher URL, fetches the article text,
+ * summarizes it (randomly rotating across 3 LLM providers with fallback),
+ * and emails you the digest.
+ *
+ * SETUP (one-time):
+ * 1. In this Apps Script project: File > Project Settings > Script Properties
+ *    > add these properties:
+ *      XAI_API_KEY    = <your xAI key>
+ *      OPENAI_API_KEY = <your OpenAI key>
+ * 2. Run `runDailyDigest` once manually to authorize permissions
+ *    (external requests + send email).
+ * 3. Set project timezone to Asia/Calcutta (Project Settings) so a "9am"
+ *    trigger means 9am IST.
+ * 4. Triggers (clock icon) > Add Trigger > function: runDailyDigest,
+ *    Time-driven, Day timer, 9am - 10am.
+ */
+
+const KEYWORD = "Artificial Intelligence";
+const MAX_ITEMS = 10;
+const RECIPIENT_EMAIL = "vishnu.subramanian1@mygreatlearning.com";
+const ARTICLE_TEXT_CHARS = 4000;
+
+const XAI_MODEL = "grok-build-0.1";
+const OPENAI_MODEL = "gpt-5-nano";
+
+function runDailyDigest() {
+  try {
+    const providerFailures = {}; // provider name -> array of error strings
+    const items = fetchDigestItems(KEYWORD, MAX_ITEMS, providerFailures);
+    const textBody = composeDigestEmail(KEYWORD, items, providerFailures);
+    const htmlBody = composeDigestEmailHtml(KEYWORD, items, providerFailures);
+    const subject = "miniFeedly Daily AI Digest - " + Utilities.formatDate(new Date(), "UTC", "yyyy-MM-dd");
+    MailApp.sendEmail({
+      to: RECIPIENT_EMAIL,
+      subject: subject,
+      body: textBody,
+      htmlBody: htmlBody,
+    });
+    Logger.log("Digest sent with %s items.", items.length);
+  } catch (err) {
+    // Never fail silently - email the error so a broken run is still visible.
+    MailApp.sendEmail(
+      RECIPIENT_EMAIL,
+      "miniFeedly Daily AI Digest - ERROR",
+      "The daily digest run failed:\n\n" + (err.stack || err.message || String(err))
+    );
+    throw err;
+  }
+}
+
+function fetchDigestItems(keyword, maxItems, providerFailures) {
+  const xml = fetchFeedXml(keyword);
+  const rawItems = parseFeedItems(xml, maxItems);
+
+  return rawItems.map(function (raw) {
+    const realUrl = resolveRealUrl(raw.link);
+    const articleText = realUrl ? fetchArticleText(realUrl) : null;
+
+    var description;
+    if (articleText) {
+      const result = summarizeArticle(raw.title, articleText, providerFailures);
+      description = result.description;
+    } else {
+      description = "Description not available (article text could not be fetched).";
+    }
+
+    return {
+      title: raw.title,
+      source: raw.source,
+      pubDate: raw.pubDate,
+      url: realUrl || raw.link,
+      description: description,
+    };
+  });
+}
+
+function fetchFeedXml(keyword) {
+  const url =
+    "https://news.google.com/rss/search?q=" +
+    encodeURIComponent(keyword) +
+    "&hl=en-US&gl=US&ceid=US:en";
+  const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  return resp.getContentText();
+}
+
+function parseFeedItems(xmlText, maxItems) {
+  const now = new Date();
+  const cutoff = new Date(now);
+  cutoff.setUTCDate(cutoff.getUTCDate() - 1);
+  cutoff.setUTCHours(0, 0, 0, 0);
+
+  const document = XmlService.parse(xmlText);
+  const channel = document.getRootElement().getChild("channel");
+  const itemElements = channel.getChildren("item");
+
+  const items = [];
+  for (var i = 0; i < itemElements.length && items.length < maxItems; i++) {
+    const el = itemElements[i];
+    const title = (el.getChildText("title") || "").trim();
+    const link = (el.getChildText("link") || "").trim();
+    const pubDateStr = (el.getChildText("pubDate") || "").trim();
+    const sourceEl = el.getChild("source");
+    const source = sourceEl ? sourceEl.getText().trim() : "";
+
+    const pubDate = new Date(pubDateStr);
+    if (isNaN(pubDate.getTime())) continue;
+    if (pubDate < cutoff || pubDate > now) continue;
+
+    items.push({ title: title, link: link, pubDate: pubDateStr, source: source });
+  }
+  return items;
+}
+
+/**
+ * Google News wraps article links behind a client-side (JS) redirect, so a
+ * plain HTTP fetch never gets a Location header to the real article. The
+ * redirect page embeds a signature + timestamp that can be used to resolve
+ * the real URL via Google's internal batchexecute RPC - this replicates that
+ * call so it works from a headless script (no browser).
+ */
+function resolveRealUrl(googleNewsUrl) {
+  try {
+    const artId = googleNewsUrl.split("/articles/")[1].split("?")[0];
+    const htmlResp = UrlFetchApp.fetch(googleNewsUrl, {
+      muteHttpExceptions: true,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    const html = htmlResp.getContentText();
+
+    const sigMatch = html.match(/data-n-a-sg="([^"]+)"/);
+    const tsMatch = html.match(/data-n-a-ts="([^"]+)"/);
+    if (!sigMatch || !tsMatch) return null;
+    const sig = sigMatch[1];
+    const ts = tsMatch[1];
+
+    const inner = JSON.stringify([
+      "garturlreq",
+      [
+        ["X", "X", ["X", "X"], null, null, 1, 1, "US:en", null, 1, null, null, null, null, null, 0, 1],
+        "X", "X", 1, [1, 1, 1], 1, 1, null, 0, 0, null, 0,
+      ],
+      artId, ts, sig,
+    ]);
+    const freq = JSON.stringify([[["Fbv4je", inner, null, "generic"]]]);
+    const body = "f.req=" + encodeURIComponent(freq);
+
+    const resp = UrlFetchApp.fetch("https://news.google.com/_/DotsSplashUi/data/batchexecute", {
+      method: "post",
+      contentType: "application/x-www-form-urlencoded;charset=UTF-8",
+      payload: body,
+      muteHttpExceptions: true,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    const respText = resp.getContentText();
+    const match = respText.match(/garturlres\\?",\\?"(https?:\/\/[^"\\]+)/);
+    return match ? match[1] : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function fetchArticleText(url) {
+  try {
+    const resp = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    var html = resp.getContentText();
+    html = html.replace(/<script[\s\S]*?<\/script>/gi, " ");
+    html = html.replace(/<style[\s\S]*?<\/style>/gi, " ");
+    html = html.replace(/<!--[\s\S]*?-->/g, " ");
+    var text = html.replace(/<[^>]+>/g, " ");
+    text = text.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    text = text.replace(/\s+/g, " ").trim();
+    return text ? text.substring(0, ARTICLE_TEXT_CHARS) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// ---- Multi-provider summarization with random rotation + fallback ----
+
+function buildSummaryPrompt(title, articleText) {
+  return (
+    "Summarize this news article in 1-2 sentences, focused on the key facts. " +
+    "Base the summary ONLY on the text provided, do not add outside knowledge.\n\n" +
+    "Title: " + title + "\n\nArticle text:\n" + articleText
+  );
+}
+
+function summarizeWithXai(title, articleText) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty("XAI_API_KEY");
+  if (!apiKey) return { ok: false, error: "XAI_API_KEY script property not set" };
+
+  const resp = UrlFetchApp.fetch("https://api.x.ai/v1/chat/completions", {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + apiKey },
+    payload: JSON.stringify({
+      model: XAI_MODEL,
+      messages: [{ role: "user", content: buildSummaryPrompt(title, articleText) }],
+    }),
+    muteHttpExceptions: true,
+  });
+  const code = resp.getResponseCode();
+  if (code < 200 || code >= 300) {
+    return { ok: false, error: "HTTP " + code + ": " + resp.getContentText().substring(0, 300) };
+  }
+  const json = JSON.parse(resp.getContentText());
+  const text = json.choices && json.choices[0].message && json.choices[0].message.content;
+  return text ? { ok: true, text: text.trim() } : { ok: false, error: "No text in xAI response" };
+}
+
+function summarizeWithOpenai(title, articleText) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty("OPENAI_API_KEY");
+  if (!apiKey) return { ok: false, error: "OPENAI_API_KEY script property not set" };
+
+  const resp = UrlFetchApp.fetch("https://api.openai.com/v1/chat/completions", {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + apiKey },
+    payload: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [{ role: "user", content: buildSummaryPrompt(title, articleText) }],
+    }),
+    muteHttpExceptions: true,
+  });
+  const code = resp.getResponseCode();
+  if (code < 200 || code >= 300) {
+    return { ok: false, error: "HTTP " + code + ": " + resp.getContentText().substring(0, 300) };
+  }
+  const json = JSON.parse(resp.getContentText());
+  const text = json.choices && json.choices[0].message && json.choices[0].message.content;
+  return text ? { ok: true, text: text.trim() } : { ok: false, error: "No text in OpenAI response" };
+}
+
+const PROVIDERS = [
+  { name: "xai", call: summarizeWithXai },
+  { name: "openai", call: summarizeWithOpenai },
+];
+
+function shuffle(array) {
+  const a = array.slice();
+  for (var i = a.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = a[i];
+    a[i] = a[j];
+    a[j] = tmp;
+  }
+  return a;
+}
+
+/**
+ * Tries providers in a random order per article (spreads load across all
+ * three). If a provider errors, records the failure in `providerFailures`
+ * (so the final email surfaces exactly which provider is broken and why)
+ * and falls through to the next provider before giving up on the article.
+ */
+function summarizeArticle(title, articleText, providerFailures) {
+  const order = shuffle(PROVIDERS);
+  for (var i = 0; i < order.length; i++) {
+    var provider = order[i];
+    var result;
+    try {
+      result = provider.call(title, articleText);
+    } catch (err) {
+      result = { ok: false, error: err.message || String(err) };
+    }
+    if (result.ok) {
+      return { description: result.text, providerUsed: provider.name };
+    }
+    if (!providerFailures[provider.name]) providerFailures[provider.name] = [];
+    providerFailures[provider.name].push(result.error);
+  }
+  return {
+    description: "Description not available (all 3 providers failed for this article).",
+    providerUsed: null,
+  };
+}
+
+function composeDigestEmail(keyword, items, providerFailures) {
+  var lines = ["miniFeedly Daily Digest: " + keyword, ""];
+
+  const failedProviders = Object.keys(providerFailures);
+  if (failedProviders.length > 0) {
+    lines.push("\u26A0 PROVIDER ISSUES THIS RUN:");
+    failedProviders.forEach(function (name) {
+      const errs = providerFailures[name];
+      lines.push("- " + name + ": failed " + errs.length + " time(s). Last error: " + errs[errs.length - 1]);
+    });
+    lines.push("");
+  }
+
+  if (items.length === 0) {
+    lines.push("No qualifying articles found in the previous-day-to-today window.");
+  }
+  items.forEach(function (it, idx) {
+    lines.push((idx + 1) + ". " + it.title);
+    lines.push("Source: " + it.url);
+    lines.push("Description: " + it.description);
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+// ---- HTML "command center" email (dark theme) ----
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function displayUrl(url) {
+  return escapeHtml(url.replace(/^https?:\/\//, ""));
+}
+
+function pad2(n) {
+  return (n < 10 ? "0" : "") + n;
+}
+
+function composeDigestEmailHtml(keyword, items, providerFailures) {
+  const nowIst = Utilities.formatDate(new Date(), "Asia/Calcutta", "yyyy-MM-dd · HH:mm 'IST'");
+
+  var alertHtml = "";
+  const failedProviders = Object.keys(providerFailures);
+  if (failedProviders.length > 0) {
+    const rows = failedProviders
+      .map(function (name) {
+        const errs = providerFailures[name];
+        return (
+          '<span style="color:#e8b04b; font-weight:700;">' + escapeHtml(name) + "</span> failed " +
+          errs.length + " call(s) this run &nbsp;·&nbsp; last error: " +
+          '<span style="color:#c9975a;">' + escapeHtml(String(errs[errs.length - 1]).substring(0, 200)) + "</span>"
+        );
+      })
+      .join("<br>");
+    alertHtml =
+      '<tr><td style="padding:16px 32px 0 32px;">' +
+      '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#2b1d0e; border:1px solid #6e4a1f; border-radius:8px;">' +
+      '<tr><td style="padding:12px 16px; font-family:\'Courier New\',Consolas,monospace; font-size:12px; color:#d29922; line-height:1.6;">' +
+      "⚠ PROVIDER ALERT &nbsp;·&nbsp; " + rows +
+      "</td></tr></table></td></tr>";
+  }
+
+  var cardsHtml;
+  if (items.length === 0) {
+    cardsHtml =
+      '<tr><td style="padding:24px 32px 0 32px; font-family:-apple-system,Helvetica,Arial,sans-serif; color:#8b949e;">' +
+      "No qualifying articles found in the previous-day-to-today window." +
+      "</td></tr>";
+  } else {
+    cardsHtml = items
+      .map(function (it, idx) {
+        return (
+          '<tr><td style="padding:' + (idx === 0 ? "24px" : "16px") + ' 32px 0 32px;">' +
+          '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#111820; border-left:3px solid #3fb950; border-radius:6px;">' +
+          '<tr><td style="padding:18px 20px;">' +
+          '<div style="font-family:\'Courier New\',Consolas,monospace; font-size:11px; color:#3fb950; letter-spacing:1px;">' +
+          pad2(idx + 1) + " &nbsp;·&nbsp; " + escapeHtml((it.source || "UNKNOWN SOURCE").toUpperCase()) +
+          "</div>" +
+          '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif; font-size:17px; font-weight:700; color:#f0f6fc; margin-top:6px; line-height:1.4;">' +
+          escapeHtml(it.title) +
+          "</div>" +
+          '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif; font-size:13px; color:#8b949e; margin-top:10px; line-height:1.6;">' +
+          '<span style="font-weight:700; color:#58a6ff;">Source:</span> ' +
+          '<a href="' + escapeHtml(it.url) + '" style="color:#58a6ff; text-decoration:none;">' + displayUrl(it.url) + "</a>" +
+          "</div>" +
+          '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif; font-size:14px; color:#c9d1d9; margin-top:8px; line-height:1.6;">' +
+          '<span style="font-weight:700; color:#e6edf3;">Description:</span> ' + escapeHtml(it.description) +
+          "</div>" +
+          "</td></tr></table></td></tr>"
+        );
+      })
+      .join("");
+  }
+
+  return (
+    '<!doctype html><html><body style="margin:0; padding:0; background:#05070a;">' +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#05070a; padding:32px 16px;">' +
+    '<tr><td align="center">' +
+    '<table role="presentation" width="680" cellpadding="0" cellspacing="0" style="width:680px; max-width:100%; background:#0d1117; border:1px solid #1f2732; border-radius:12px; overflow:hidden;">' +
+    '<tr><td style="padding:28px 32px 20px 32px; border-bottom:1px solid #1f2732;">' +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
+    '<td style="font-family:\'Courier New\',Consolas,monospace; font-size:12px; letter-spacing:3px; color:#3fb950; text-transform:uppercase;">● MINIFEEDLY // LIVE FEED</td>' +
+    '<td align="right" style="font-family:\'Courier New\',Consolas,monospace; font-size:12px; color:#5b6472;">' + nowIst + "</td>" +
+    "</tr></table>" +
+    '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif; font-size:22px; font-weight:700; color:#e6edf3; margin-top:10px;">Daily AI Digest</div>' +
+    '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif; font-size:13px; color:#8b949e; margin-top:4px;">' +
+    "Topic: <span style=\"color:#58a6ff;\">" + escapeHtml(keyword) + "</span> &nbsp;·&nbsp; " + items.length + " articles &nbsp;·&nbsp; window: previous day → today" +
+    "</div>" +
+    "</td></tr>" +
+    alertHtml +
+    cardsHtml +
+    '<tr><td style="padding:28px 32px 28px 32px;">' +
+    '<div style="border-top:1px solid #1f2732; padding-top:16px; font-family:\'Courier New\',Consolas,monospace; font-size:11px; color:#4b535e; text-align:center;">' +
+    "miniFeedly &nbsp;·&nbsp; generated by Google Apps Script" +
+    "</div></td></tr>" +
+    "</table></td></tr></table></body></html>"
+  );
+}
