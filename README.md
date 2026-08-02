@@ -3,8 +3,8 @@
 Minimal, always-on AI news digest. Fetches Google News RSS for a keyword,
 keeps only articles from the previous day through today, resolves each
 Google News redirect link to the real publisher URL, fetches the article
-text, pulls its first few sentences verbatim, and emails a dark-themed
-digest.
+text, summarizes all of them in a single Gemini call, and emails a
+dark-themed digest.
 
 ## Deployed pipeline: Google Apps Script (`miniFeedly.gs`)
 
@@ -21,18 +21,27 @@ Pipeline per run:
 3. Fetch each real article's page and strip it down to plain text. Some
    publishers (paywalled or bot-blocking) will fail here - expected, not
    an error.
-4. Extract the first few sentences of that text verbatim as the "First
-   Paragraph" (`extractFirstParagraph`) - no LLM call, no API keys needed.
+4. Summarize every article that has scraped text in **one** Gemini request
+   (`summarizeAllWithGemini`) - the free tier has a low requests-per-day
+   limit, so this batches all articles into a single call instead of one
+   call per article. Any article Gemini doesn't return a summary for (call
+   failed, key missing, response unparseable), or whose text couldn't be
+   scraped at all, falls back to a verbatim first-few-sentences extract
+   (`extractFirstParagraph`) - no LLM needed for that path.
 5. Email the digest as a dark "command center" styled HTML dashboard
    (`composeDigestEmailHtml`), with a plain-text fallback body.
 
 ### One-time setup
 
-1. **Project Settings > Time zone** -> set to `Asia/Calcutta` (so a "9am"
+1. Get a [Gemini API key](https://aistudio.google.com) and add it as a
+   Script Property named `GEMINI_API_KEY` (**Project Settings > Script
+   Properties**). Without it, every article just uses the verbatim
+   fallback - no error, just no LLM summary.
+2. **Project Settings > Time zone** -> set to `Asia/Calcutta` (so a "9am"
    trigger means 9am IST, not UTC).
-2. Run `runDailyDigest` once manually to authorize permissions (external
+3. Run `runDailyDigest` once manually to authorize permissions (external
    requests + send email).
-3. **Triggers (clock icon) > Add Trigger** -> function `runDailyDigest`,
+4. **Triggers (clock icon) > Add Trigger** -> function `runDailyDigest`,
    Time-driven, Day timer, 9am-10am.
 
 ### Config constants (top of `miniFeedly.gs`)
@@ -40,8 +49,9 @@ Pipeline per run:
 - `KEYWORD` - search keyword (default `"Artificial Intelligence"`)
 - `MAX_ITEMS` - max articles per digest (default 10)
 - `RECIPIENT_EMAIL` - who gets the email
-- `FIRST_PARAGRAPH_SENTENCES` - how many sentences to pull as the "First
-  Paragraph" (default 3)
+- `GEMINI_MODEL` - Gemini model used for the single batched summary call
+- `FALLBACK_SUMMARY_SENTENCES` - how many sentences to pull verbatim when
+  Gemini isn't used for a given article (default 3)
 
 ## Reference implementation: `fetch_digest.py`
 
