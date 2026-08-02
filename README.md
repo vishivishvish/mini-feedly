@@ -3,8 +3,8 @@
 Minimal, always-on AI news digest. Fetches Google News RSS for a keyword,
 keeps only articles from the previous day through today, resolves each
 Google News redirect link to the real publisher URL, fetches the article
-text, summarizes all of them in a single Gemini call, and emails a
-dark-themed digest.
+text, summarizes all of them in a single Gemini call to stay well within
+the free tier's daily request limit, and emails a dark-themed digest.
 
 ## Deployed pipeline: Google Apps Script (`miniFeedly.gs`)
 
