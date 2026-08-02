@@ -3,20 +3,16 @@
  *
  * Daily AI news digest: fetches Google News RSS for a keyword, keeps only
  * articles from the previous day through today, resolves each Google News
- * redirect link to the real publisher URL, fetches the article text,
- * summarizes it (randomly rotating across 3 LLM providers with fallback),
- * and emails you the digest.
+ * redirect link to the real publisher URL, fetches the article text, pulls
+ * the first few sentences of it verbatim (no LLM call), and emails you the
+ * digest.
  *
  * SETUP (one-time):
- * 1. In this Apps Script project: File > Project Settings > Script Properties
- *    > add these properties:
- *      XAI_API_KEY    = <your xAI key>
- *      OPENAI_API_KEY = <your OpenAI key>
- * 2. Run `runDailyDigest` once manually to authorize permissions
+ * 1. Run `runDailyDigest` once manually to authorize permissions
  *    (external requests + send email).
- * 3. Set project timezone to Asia/Calcutta (Project Settings) so a "9am"
+ * 2. Set project timezone to Asia/Calcutta (Project Settings) so a "9am"
  *    trigger means 9am IST.
- * 4. Triggers (clock icon) > Add Trigger > function: runDailyDigest,
+ * 3. Triggers (clock icon) > Add Trigger > function: runDailyDigest,
  *    Time-driven, Day timer, 9am - 10am.
  */
 
@@ -24,16 +20,13 @@ const KEYWORD = "Artificial Intelligence";
 const MAX_ITEMS = 10;
 const RECIPIENT_EMAIL = "vishnu.subramanian1@mygreatlearning.com";
 const ARTICLE_TEXT_CHARS = 4000;
-
-const XAI_MODEL = "grok-build-0.1";
-const OPENAI_MODEL = "gpt-5-nano";
+const FIRST_PARAGRAPH_SENTENCES = 3;
 
 function runDailyDigest() {
   try {
-    const providerFailures = {}; // provider name -> array of error strings
-    const items = fetchDigestItems(KEYWORD, MAX_ITEMS, providerFailures);
-    const textBody = composeDigestEmail(KEYWORD, items, providerFailures);
-    const htmlBody = composeDigestEmailHtml(KEYWORD, items, providerFailures);
+    const items = fetchDigestItems(KEYWORD, MAX_ITEMS);
+    const textBody = composeDigestEmail(KEYWORD, items);
+    const htmlBody = composeDigestEmailHtml(KEYWORD, items);
     const subject = "miniFeedly Daily AI Digest - " + Utilities.formatDate(new Date(), "UTC", "yyyy-MM-dd");
     MailApp.sendEmail({
       to: RECIPIENT_EMAIL,
@@ -53,28 +46,23 @@ function runDailyDigest() {
   }
 }
 
-function fetchDigestItems(keyword, maxItems, providerFailures) {
+function fetchDigestItems(keyword, maxItems) {
   const xml = fetchFeedXml(keyword);
   const rawItems = parseFeedItems(xml, maxItems);
 
   return rawItems.map(function (raw) {
     const realUrl = resolveRealUrl(raw.link);
     const articleText = realUrl ? fetchArticleText(realUrl) : null;
-
-    var description;
-    if (articleText) {
-      const result = summarizeArticle(raw.title, articleText, providerFailures);
-      description = result.description;
-    } else {
-      description = "Description not available (article text could not be fetched).";
-    }
+    const firstParagraph = articleText
+      ? extractFirstParagraph(articleText, FIRST_PARAGRAPH_SENTENCES)
+      : "First paragraph not available (article text could not be fetched).";
 
     return {
       title: raw.title,
       source: raw.source,
       pubDate: raw.pubDate,
       url: realUrl || raw.link,
-      description: description,
+      firstParagraph: firstParagraph,
     };
   });
 }
@@ -183,118 +171,25 @@ function fetchArticleText(url) {
   }
 }
 
-// ---- Multi-provider summarization with random rotation + fallback ----
-
-function buildSummaryPrompt(title, articleText) {
-  return (
-    "Summarize this news article in 1-2 sentences, focused on the key facts. " +
-    "Base the summary ONLY on the text provided, do not add outside knowledge.\n\n" +
-    "Title: " + title + "\n\nArticle text:\n" + articleText
-  );
-}
-
-function summarizeWithXai(title, articleText) {
-  const apiKey = PropertiesService.getScriptProperties().getProperty("XAI_API_KEY");
-  if (!apiKey) return { ok: false, error: "XAI_API_KEY script property not set" };
-
-  const resp = UrlFetchApp.fetch("https://api.x.ai/v1/chat/completions", {
-    method: "post",
-    contentType: "application/json",
-    headers: { Authorization: "Bearer " + apiKey },
-    payload: JSON.stringify({
-      model: XAI_MODEL,
-      messages: [{ role: "user", content: buildSummaryPrompt(title, articleText) }],
-    }),
-    muteHttpExceptions: true,
-  });
-  const code = resp.getResponseCode();
-  if (code < 200 || code >= 300) {
-    return { ok: false, error: "HTTP " + code + ": " + resp.getContentText().substring(0, 300) };
-  }
-  const json = JSON.parse(resp.getContentText());
-  const text = json.choices && json.choices[0].message && json.choices[0].message.content;
-  return text ? { ok: true, text: text.trim() } : { ok: false, error: "No text in xAI response" };
-}
-
-function summarizeWithOpenai(title, articleText) {
-  const apiKey = PropertiesService.getScriptProperties().getProperty("OPENAI_API_KEY");
-  if (!apiKey) return { ok: false, error: "OPENAI_API_KEY script property not set" };
-
-  const resp = UrlFetchApp.fetch("https://api.openai.com/v1/chat/completions", {
-    method: "post",
-    contentType: "application/json",
-    headers: { Authorization: "Bearer " + apiKey },
-    payload: JSON.stringify({
-      model: OPENAI_MODEL,
-      messages: [{ role: "user", content: buildSummaryPrompt(title, articleText) }],
-    }),
-    muteHttpExceptions: true,
-  });
-  const code = resp.getResponseCode();
-  if (code < 200 || code >= 300) {
-    return { ok: false, error: "HTTP " + code + ": " + resp.getContentText().substring(0, 300) };
-  }
-  const json = JSON.parse(resp.getContentText());
-  const text = json.choices && json.choices[0].message && json.choices[0].message.content;
-  return text ? { ok: true, text: text.trim() } : { ok: false, error: "No text in OpenAI response" };
-}
-
-const PROVIDERS = [
-  { name: "xai", call: summarizeWithXai },
-  { name: "openai", call: summarizeWithOpenai },
-];
-
-function shuffle(array) {
-  const a = array.slice();
-  for (var i = a.length - 1; i > 0; i--) {
-    var j = Math.floor(Math.random() * (i + 1));
-    var tmp = a[i];
-    a[i] = a[j];
-    a[j] = tmp;
-  }
-  return a;
-}
-
 /**
- * Tries providers in a random order per article (spreads load across all
- * three). If a provider errors, records the failure in `providerFailures`
- * (so the final email surfaces exactly which provider is broken and why)
- * and falls through to the next provider before giving up on the article.
+ * Pulls the first few sentences out of the flattened article text verbatim -
+ * no LLM call. fetchArticleText() already stripped HTML and collapsed
+ * whitespace into one continuous run of text, so paragraph breaks are gone;
+ * splitting on sentence-ending punctuation is the closest available proxy
+ * for "first paragraph."
  */
-function summarizeArticle(title, articleText, providerFailures) {
-  const order = shuffle(PROVIDERS);
-  for (var i = 0; i < order.length; i++) {
-    var provider = order[i];
-    var result;
-    try {
-      result = provider.call(title, articleText);
-    } catch (err) {
-      result = { ok: false, error: err.message || String(err) };
-    }
-    if (result.ok) {
-      return { description: result.text, providerUsed: provider.name };
-    }
-    if (!providerFailures[provider.name]) providerFailures[provider.name] = [];
-    providerFailures[provider.name].push(result.error);
+function extractFirstParagraph(articleText, maxSentences) {
+  if (!articleText) return null;
+  const sentences = articleText.match(/[^.!?]+[.!?]+(\s+|$)/g);
+  if (!sentences || sentences.length === 0) {
+    return articleText.substring(0, 400).trim();
   }
-  return {
-    description: "Description not available (all 3 providers failed for this article).",
-    providerUsed: null,
-  };
+  const count = Math.min(maxSentences || 3, sentences.length);
+  return sentences.slice(0, count).join("").trim();
 }
 
-function composeDigestEmail(keyword, items, providerFailures) {
+function composeDigestEmail(keyword, items) {
   var lines = ["miniFeedly Daily Digest: " + keyword, ""];
-
-  const failedProviders = Object.keys(providerFailures);
-  if (failedProviders.length > 0) {
-    lines.push("\u26A0 PROVIDER ISSUES THIS RUN:");
-    failedProviders.forEach(function (name) {
-      const errs = providerFailures[name];
-      lines.push("- " + name + ": failed " + errs.length + " time(s). Last error: " + errs[errs.length - 1]);
-    });
-    lines.push("");
-  }
 
   if (items.length === 0) {
     lines.push("No qualifying articles found in the previous-day-to-today window.");
@@ -302,7 +197,7 @@ function composeDigestEmail(keyword, items, providerFailures) {
   items.forEach(function (it, idx) {
     lines.push((idx + 1) + ". " + it.title);
     lines.push("Source: " + it.url);
-    lines.push("Description: " + it.description);
+    lines.push("First Paragraph: " + it.firstParagraph);
     lines.push("");
   });
   return lines.join("\n");
@@ -327,29 +222,8 @@ function pad2(n) {
   return (n < 10 ? "0" : "") + n;
 }
 
-function composeDigestEmailHtml(keyword, items, providerFailures) {
+function composeDigestEmailHtml(keyword, items) {
   const nowIst = Utilities.formatDate(new Date(), "Asia/Calcutta", "yyyy-MM-dd · HH:mm 'IST'");
-
-  var alertHtml = "";
-  const failedProviders = Object.keys(providerFailures);
-  if (failedProviders.length > 0) {
-    const rows = failedProviders
-      .map(function (name) {
-        const errs = providerFailures[name];
-        return (
-          '<span style="color:#e8b04b; font-weight:700;">' + escapeHtml(name) + "</span> failed " +
-          errs.length + " call(s) this run &nbsp;·&nbsp; last error: " +
-          '<span style="color:#c9975a;">' + escapeHtml(String(errs[errs.length - 1]).substring(0, 200)) + "</span>"
-        );
-      })
-      .join("<br>");
-    alertHtml =
-      '<tr><td style="padding:16px 32px 0 32px;">' +
-      '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#2b1d0e; border:1px solid #6e4a1f; border-radius:8px;">' +
-      '<tr><td style="padding:12px 16px; font-family:\'Courier New\',Consolas,monospace; font-size:12px; color:#d29922; line-height:1.6;">' +
-      "⚠ PROVIDER ALERT &nbsp;·&nbsp; " + rows +
-      "</td></tr></table></td></tr>";
-  }
 
   var cardsHtml;
   if (items.length === 0) {
@@ -375,7 +249,7 @@ function composeDigestEmailHtml(keyword, items, providerFailures) {
           '<a href="' + escapeHtml(it.url) + '" style="color:#58a6ff; text-decoration:none;">' + displayUrl(it.url) + "</a>" +
           "</div>" +
           '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif; font-size:14px; color:#c9d1d9; margin-top:8px; line-height:1.6;">' +
-          '<span style="font-weight:700; color:#e6edf3;">Description:</span> ' + escapeHtml(it.description) +
+          '<span style="font-weight:700; color:#e6edf3;">First Paragraph:</span> ' + escapeHtml(it.firstParagraph) +
           "</div>" +
           "</td></tr></table></td></tr>"
         );
@@ -398,7 +272,6 @@ function composeDigestEmailHtml(keyword, items, providerFailures) {
     "Topic: <span style=\"color:#58a6ff;\">" + escapeHtml(keyword) + "</span> &nbsp;·&nbsp; " + items.length + " articles &nbsp;·&nbsp; window: previous day → today" +
     "</div>" +
     "</td></tr>" +
-    alertHtml +
     cardsHtml +
     '<tr><td style="padding:28px 32px 28px 32px;">' +
     '<div style="border-top:1px solid #1f2732; padding-top:16px; font-family:\'Courier New\',Consolas,monospace; font-size:11px; color:#4b535e; text-align:center;">' +
