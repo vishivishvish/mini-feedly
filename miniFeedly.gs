@@ -3,16 +3,21 @@
  *
  * Daily AI news digest: fetches Google News RSS for a keyword, keeps only
  * articles from the previous day through today, resolves each Google News
- * redirect link to the real publisher URL, fetches the article text, pulls
- * the first few sentences of it verbatim (no LLM call), and emails you the
- * digest.
+ * redirect link to the real publisher URL, fetches the article text, and
+ * summarizes ALL articles in a single Gemini call (the free tier has a low
+ * requests-per-day limit, so this hits the API once per run, not once per
+ * article). Any article whose text couldn't be scraped, or that Gemini
+ * fails/doesn't return, falls back to a verbatim first-few-sentences
+ * extract - no LLM needed for that path.
  *
  * SETUP (one-time):
- * 1. Run `runDailyDigest` once manually to authorize permissions
+ * 1. In this Apps Script project: File > Project Settings > Script
+ *    Properties > add `GEMINI_API_KEY` = <your Gemini API key>.
+ * 2. Run `runDailyDigest` once manually to authorize permissions
  *    (external requests + send email).
- * 2. Set project timezone to Asia/Calcutta (Project Settings) so a "9am"
+ * 3. Set project timezone to Asia/Calcutta (Project Settings) so a "9am"
  *    trigger means 9am IST.
- * 3. Triggers (clock icon) > Add Trigger > function: runDailyDigest,
+ * 4. Triggers (clock icon) > Add Trigger > function: runDailyDigest,
  *    Time-driven, Day timer, 9am - 10am.
  */
 
@@ -20,7 +25,8 @@ const KEYWORD = "Artificial Intelligence";
 const MAX_ITEMS = 10;
 const RECIPIENT_EMAIL = "vishnu.subramanian1@mygreatlearning.com";
 const ARTICLE_TEXT_CHARS = 4000;
-const FIRST_PARAGRAPH_SENTENCES = 3;
+const FALLBACK_SUMMARY_SENTENCES = 3;
+const GEMINI_MODEL = "gemini-3.1-flash-lite";
 
 function runDailyDigest() {
   try {
@@ -50,21 +56,104 @@ function fetchDigestItems(keyword, maxItems) {
   const xml = fetchFeedXml(keyword);
   const rawItems = parseFeedItems(xml, maxItems);
 
-  return rawItems.map(function (raw) {
+  const fetched = rawItems.map(function (raw, idx) {
     const realUrl = resolveRealUrl(raw.link);
     const articleText = realUrl ? fetchArticleText(realUrl) : null;
-    const firstParagraph = articleText
-      ? extractFirstParagraph(articleText, FIRST_PARAGRAPH_SENTENCES)
-      : "First paragraph not available (article text could not be fetched).";
+    return { index: idx, raw: raw, realUrl: realUrl, articleText: articleText };
+  });
+
+  // One Gemini call for every article that has scraped text - not one call
+  // per article - to stay well under the free tier's daily request limit.
+  const geminiInput = fetched
+    .filter(function (f) { return !!f.articleText; })
+    .map(function (f) { return { index: f.index, title: f.raw.title, articleText: f.articleText }; });
+
+  var geminiSummaries = null;
+  try {
+    geminiSummaries = summarizeAllWithGemini(geminiInput);
+  } catch (err) {
+    geminiSummaries = null; // Fall through to the per-article fallback below.
+  }
+
+  return fetched.map(function (f) {
+    var summary;
+    if (geminiSummaries && geminiSummaries[f.index]) {
+      summary = geminiSummaries[f.index];
+    } else if (f.articleText) {
+      summary = extractFirstParagraph(f.articleText, FALLBACK_SUMMARY_SENTENCES);
+    } else {
+      summary = "Summary not available (article text could not be fetched).";
+    }
 
     return {
-      title: raw.title,
-      source: raw.source,
-      pubDate: raw.pubDate,
-      url: realUrl || raw.link,
-      firstParagraph: firstParagraph,
+      title: f.raw.title,
+      source: f.raw.source,
+      pubDate: f.raw.pubDate,
+      url: f.realUrl || f.raw.link,
+      summary: summary,
     };
   });
+}
+
+/**
+ * Summarizes every article in ONE Gemini request (not one request per
+ * article) - the free tier's requests-per-day limit is low, so batching
+ * everything into a single call is what keeps this usable daily.
+ * Returns { index: "one-line summary" } keyed by each entry's original
+ * index, or null if the key is missing / the call fails / the response
+ * can't be parsed - callers should fall back per-article in that case.
+ */
+function summarizeAllWithGemini(entries) {
+  if (entries.length === 0) return {};
+
+  const apiKey = PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY");
+  if (!apiKey) return null;
+
+  const articlesBlock = entries
+    .map(function (e) {
+      return "Article " + e.index + ":\nTitle: " + e.title + "\nText: " + e.articleText;
+    })
+    .join("\n\n");
+
+  const instructions =
+    "You will be given " + entries.length + " news articles, each labeled with an Article number. " +
+    "For each one, write exactly one sentence summarizing it, based ONLY on the text provided - do " +
+    "not add outside knowledge. Return ONLY a JSON array with exactly " + entries.length + " elements, " +
+    "each of the form {\"index\": <the article's Article number>, \"summary\": \"<one sentence>\"}. " +
+    "Keep the same Article numbers given below - do not renumber or reorder.\n\n" + articlesBlock;
+
+  const resp = UrlFetchApp.fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent?key=" + apiKey,
+    {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify({
+        contents: [{ parts: [{ text: instructions }] }],
+        generationConfig: { responseMimeType: "application/json" },
+      }),
+      muteHttpExceptions: true,
+    }
+  );
+
+  const code = resp.getResponseCode();
+  if (code < 200 || code >= 300) return null;
+
+  try {
+    const json = JSON.parse(resp.getContentText());
+    const text = json.candidates && json.candidates[0].content.parts[0].text;
+    if (!text) return null;
+
+    const parsed = JSON.parse(text);
+    const map = {};
+    parsed.forEach(function (entry) {
+      if (entry && typeof entry.index !== "undefined" && entry.summary) {
+        map[entry.index] = String(entry.summary).trim();
+      }
+    });
+    return map;
+  } catch (err) {
+    return null;
+  }
 }
 
 function fetchFeedXml(keyword) {
@@ -197,7 +286,7 @@ function composeDigestEmail(keyword, items) {
   items.forEach(function (it, idx) {
     lines.push((idx + 1) + ". " + it.title);
     lines.push("Source: " + it.url);
-    lines.push("First Paragraph: " + it.firstParagraph);
+    lines.push("Summary: " + it.summary);
     lines.push("");
   });
   return lines.join("\n");
@@ -249,7 +338,7 @@ function composeDigestEmailHtml(keyword, items) {
           '<a href="' + escapeHtml(it.url) + '" style="color:#58a6ff; text-decoration:none;">' + displayUrl(it.url) + "</a>" +
           "</div>" +
           '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif; font-size:14px; color:#c9d1d9; margin-top:8px; line-height:1.6;">' +
-          '<span style="font-weight:700; color:#e6edf3;">First Paragraph:</span> ' + escapeHtml(it.firstParagraph) +
+          '<span style="font-weight:700; color:#e6edf3;">Summary:</span> ' + escapeHtml(it.summary) +
           "</div>" +
           "</td></tr></table></td></tr>"
         );
