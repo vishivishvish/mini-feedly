@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>miniFeedly</title>
+<base target="_top">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #05070a;
+    color: #e6edf3;
+    font-family: -apple-system, Helvetica, Arial, sans-serif;
+    min-height: 100vh;
+  }
+
+  .topbar {
+    background: #0d1117;
+    border-bottom: 1px solid #1f2732;
+    padding: 16px 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .brand {
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 13px;
+    letter-spacing: 3px;
+    color: #3fb950;
+    text-transform: uppercase;
+  }
+  .refresh-btn {
+    background: none;
+    border: 1px solid #1f2732;
+    color: #8b949e;
+    font-size: 12px;
+    font-family: 'Courier New', Consolas, monospace;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .refresh-btn:hover { color: #e6edf3; border-color: #3fb950; }
+
+  .layout {
+    display: flex;
+    max-width: 1100px;
+    margin: 0 auto;
+    min-height: calc(100vh - 57px);
+  }
+
+  .sidebar {
+    width: 240px;
+    flex-shrink: 0;
+    border-right: 1px solid #1f2732;
+    padding: 20px 0;
+  }
+  .kw-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 24px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #8b949e;
+    border-left: 3px solid transparent;
+  }
+  .kw-item:hover { color: #e6edf3; }
+  .kw-item.active {
+    color: #e6edf3;
+    background: #111820;
+    border-left-color: #3fb950;
+  }
+  .kw-count {
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 11px;
+    color: #5b6472;
+  }
+
+  .main { flex: 1; min-width: 0; padding: 28px 32px; }
+  .main-header { margin-bottom: 18px; }
+  .main-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: #e6edf3;
+  }
+  .main-sub {
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 12px;
+    color: #8b949e;
+    margin-top: 4px;
+  }
+
+  .article-card {
+    background: #111820;
+    border-left: 3px solid #3fb950;
+    border-radius: 6px;
+    padding: 16px 18px;
+    margin-bottom: 12px;
+  }
+  .article-meta {
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 11px;
+    color: #3fb950;
+    letter-spacing: 1px;
+  }
+  .article-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #f0f6fc;
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+  .article-link {
+    display: block;
+    font-size: 13px;
+    color: #58a6ff;
+    text-decoration: none;
+    margin-top: 8px;
+    word-break: break-all;
+  }
+  .article-link:hover { text-decoration: underline; }
+  .article-date {
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 11px;
+    color: #5b6472;
+    margin-top: 8px;
+  }
+
+  .empty-state {
+    color: #8b949e;
+    font-size: 14px;
+    padding: 20px 0;
+  }
+</style>
+</head>
+<body>
+
+  <div class="topbar">
+    <span class="brand">● miniFeedly // Live Feed</span>
+    <button class="refresh-btn" id="refreshBtn">Refresh</button>
+  </div>
+
+  <div class="layout">
+    <div class="sidebar" id="sidebar">
+      <div class="empty-state">Loading keywords…</div>
+    </div>
+    <div class="main" id="main">
+      <div class="empty-state">Loading articles…</div>
+    </div>
+  </div>
+
+<script>
+  var trackerData = { keywords: [], articles: {} };
+  var activeKeyword = null;
+
+  function escapeHtml(str) {
+    return String(str == null ? "" : str)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function displayUrl(url) {
+    return escapeHtml(String(url || "").replace(/^https?:\/\//, ""));
+  }
+
+  function renderSidebar() {
+    var sidebar = document.getElementById("sidebar");
+    if (trackerData.keywords.length === 0) {
+      sidebar.innerHTML = '<div class="empty-state" style="padding:0 24px;">No keywords tracked yet.</div>';
+      return;
+    }
+    sidebar.innerHTML = trackerData.keywords.map(function (kw) {
+      var count = (trackerData.articles[kw] || []).length;
+      return (
+        '<div class="kw-item' + (kw === activeKeyword ? " active" : "") + '" data-keyword="' + escapeHtml(kw) + '">' +
+          '<span>' + escapeHtml(kw) + "</span>" +
+          '<span class="kw-count">' + count + "</span>" +
+        "</div>"
+      );
+    }).join("");
+  }
+
+  function renderMain() {
+    var main = document.getElementById("main");
+    var articles = trackerData.articles[activeKeyword] || [];
+
+    var headerHtml =
+      '<div class="main-header">' +
+        '<div class="main-title">' + escapeHtml(activeKeyword || "") + "</div>" +
+        '<div class="main-sub">' + articles.length + " article(s) tracked · newest first</div>" +
+      "</div>";
+
+    if (articles.length === 0) {
+      main.innerHTML = headerHtml + '<div class="empty-state">No articles tracked for this keyword yet - check back after tomorrow\'s 9am run.</div>';
+      return;
+    }
+
+    var cardsHtml = articles.map(function (a) {
+      return (
+        '<div class="article-card">' +
+          '<div class="article-meta">' + escapeHtml((a.source || "UNKNOWN SOURCE").toUpperCase()) + "</div>" +
+          '<div class="article-title">' + escapeHtml(a.title) + "</div>" +
+          '<a class="article-link" href="' + escapeHtml(a.url) + '" target="_blank" rel="noopener">' + displayUrl(a.url) + "</a>" +
+          '<div class="article-date">First tracked ' + escapeHtml(a.firstSeen) + "</div>" +
+        "</div>"
+      );
+    }).join("");
+
+    main.innerHTML = headerHtml + cardsHtml;
+  }
+
+  function loadTracker() {
+    document.getElementById("sidebar").innerHTML = '<div class="empty-state" style="padding:0 24px;">Loading keywords…</div>';
+    document.getElementById("main").innerHTML = '<div class="empty-state">Loading articles…</div>';
+    google.script.run
+      .withSuccessHandler(function (data) {
+        trackerData = data || { keywords: [], articles: {} };
+        if (!activeKeyword || trackerData.keywords.indexOf(activeKeyword) === -1) {
+          activeKeyword = trackerData.keywords[0] || null;
+        }
+        renderSidebar();
+        renderMain();
+      })
+      .withFailureHandler(function (err) {
+        console.error(err);
+        document.getElementById("main").innerHTML = '<div class="empty-state">Failed to load - check the Apps Script execution log.</div>';
+      })
+      .getTrackerData();
+  }
+
+  document.getElementById("sidebar").addEventListener("click", function (e) {
+    var el = e.target.closest(".kw-item");
+    if (!el) return;
+    activeKeyword = el.getAttribute("data-keyword");
+    renderSidebar();
+    renderMain();
+  });
+
+  document.getElementById("refreshBtn").addEventListener("click", loadTracker);
+
+  loadTracker();
+</script>
+
+</body>
+</html>
