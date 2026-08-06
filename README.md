@@ -1,6 +1,6 @@
 # miniFeedly
 
-A Feedly-like, multi-keyword news tracker that runs entirely out of one
+A Feedly-like, multi-keyword news tracker that runs entirely out of a
 Google Apps Script project: no external hosting, no separate login beyond
 your own Google account.
 
