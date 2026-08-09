@@ -1,4 +1,4 @@
-# miniFeedly
+# mini-feedly
 
 A Feedly-like, multi-keyword news tracker that runs entirely out of a
 Google Apps Script project: no external hosting, no separate login beyond
@@ -27,7 +27,7 @@ Keep this list current whenever a feature is added or changed.
   redirect; `resolveRealUrl` replicates Google's internal `batchexecute` RPC
   to get the real publisher URL from a headless script.
 
-## Deployed pipeline: Google Apps Script (`miniFeedly.gs` + `Index.html`)
+## Deployed pipeline: Google Apps Script (`mini-feedly.gs` + `Index.html`)
 
 This is what actually runs. It lives in a Google Apps Script project (not
 this repo directly - paste both files into the Apps Script editor,
@@ -55,13 +55,13 @@ it was first tracked. Reads directly from the `Articles` Sheet via
 
 ### One-time setup
 
-1. Paste `miniFeedly.gs` and `Index.html` into an Apps Script project
+1. Paste `mini-feedly.gs` and `Index.html` into an Apps Script project
    (`Index.html` as a separate HTML file, named exactly `Index`).
-2. Edit the `KEYWORDS` array in `miniFeedly.gs` to the topics you want
+2. Edit the `KEYWORDS` array in `mini-feedly.gs` to the topics you want
    tracked.
 3. Run `runDailyDigest` once manually to authorize permissions (external
    requests, Sheets, send email) - this also creates the backing
-   "miniFeedly Data" Sheet on first run and stores its ID in this script's
+   "mini-feedly Data" Sheet on first run and stores its ID in this script's
    Script Properties.
 4. **Project Settings > Time zone** -> set to `Asia/Calcutta` (so a "9am"
    trigger means 9am IST, not UTC).
@@ -81,7 +81,7 @@ it was first tracked. Reads directly from the `Articles` Sheet via
   script's Script Properties), never by path, so it can be moved between
   Drive folders at any time without breaking anything.
 
-### Config constants (top of `miniFeedly.gs`)
+### Config constants (top of `mini-feedly.gs`)
 
 - `KEYWORDS` - array of tracked search keywords (default
   `["Artificial Intelligence"]`)
