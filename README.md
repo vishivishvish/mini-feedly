@@ -63,8 +63,9 @@ it was first tracked. Reads directly from the `Articles` Sheet via
    requests, Sheets, send email) - this also creates the backing
    "mini-feedly Data" Sheet on first run and stores its ID in this script's
    Script Properties.
-4. **Project Settings > Time zone** -> set to `Asia/Calcutta` (so a "9am"
-   trigger means 9am IST, not UTC).
+4. **Project Settings > Time zone** -> set to `Asia/Calcutta` (the legacy
+   IANA name for `Asia/Kolkata`/IST, so a "9am" trigger means 9am IST, not
+   UTC).
 5. **Triggers (clock icon) > Add Trigger** -> function `runDailyDigest`,
    Time-driven, Day timer, 9am-10am.
 6. **Deploy > New deployment > Web app**. Execute as: **Me**. Who has
