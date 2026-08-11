@@ -77,7 +77,8 @@ it was first tracked. Reads directly from the `Articles` Sheet via
 
 ### Data model (Sheet, auto-created on first run)
 
-- `Articles`: Keyword, Title, Source, PubDate, Url, FirstSeenDate
+- `Articles`: Keyword, Title, Source, PubDate, Url, FirstSeenDate (`Url` is
+  the resolved real publisher URL, not the Google News redirect link)
 - The Sheet is referenced by its permanent Drive file ID (stored in this
   script's Script Properties), never by path, so it can be moved between
   Drive folders at any time without breaking anything.
