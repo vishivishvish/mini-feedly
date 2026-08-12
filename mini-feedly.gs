@@ -8,9 +8,10 @@
  *    persistent Sheet (deduped by URL, per keyword), and emails a plain
  *    title + URL digest - no article scraping, no LLM summary call.
  * 2. A web app (`doGet`) that reads that same Sheet and shows a Feedly-like
- *    per-keyword history of every article ever tracked (capped at the most
- *    recent `HISTORY_DISPLAY_CAP` per keyword for page load speed - the
- *    Sheet itself keeps everything).
+ *    per-keyword history of every article ever tracked, `PAGE_SIZE` articles
+ *    at a time (newest first) with a "See More" button to page through the
+ *    rest - the Sheet itself keeps everything regardless of how much of it
+ *    has been paged through.
  *
  * SETUP (one-time):
  * 1. Paste this file and Index.html into an Apps Script project (Index.html
@@ -29,9 +30,9 @@
  *    New version > Deploy.
  */
 
-const KEYWORDS = ["Artificial Intelligence"];
+const KEYWORDS = ["Artificial Intelligence", "Robotics"];
 const MAX_ITEMS_PER_KEYWORD = 10;
-const HISTORY_DISPLAY_CAP = 200;
+const PAGE_SIZE = 20;
 const RECIPIENT_EMAIL = "vishnu.subramanian1@mygreatlearning.com";
 
 const SHEET_NAMES = {
@@ -237,11 +238,33 @@ function doGet() {
 }
 
 /**
- * Returns every tracked keyword's article history, newest first, capped at
- * HISTORY_DISPLAY_CAP per keyword for page load speed - the Sheet itself
- * keeps the full history regardless of this cap.
+ * Returns the tracked keyword list plus each keyword's total article count,
+ * for the sidebar. Cheap compared to getArticlesPage_ since it never builds
+ * per-article objects.
  */
-function getTrackerData() {
+function getKeywordCounts() {
+  const sheet = getArticlesSheet_();
+  const data = sheet.getDataRange().getValues();
+  const headers = data.shift();
+  const kwIdx = headers.indexOf("Keyword");
+
+  const counts = {};
+  KEYWORDS.forEach(function (k) { counts[k] = 0; });
+  data.forEach(function (row) {
+    const kw = row[kwIdx];
+    counts[kw] = (counts[kw] || 0) + 1;
+  });
+
+  return JSON.parse(JSON.stringify({ keywords: KEYWORDS, counts: counts }));
+}
+
+/**
+ * Returns one page of a single keyword's article history, newest first.
+ * `offset` is how many newest-first articles to skip (0 for the first
+ * page), `limit` is how many to return after that (PAGE_SIZE from the
+ * client). `hasMore` tells the client whether to show another "See More".
+ */
+function getArticlesPage(keyword, offset, limit) {
   const sheet = getArticlesSheet_();
   const data = sheet.getDataRange().getValues();
   const headers = data.shift();
@@ -252,29 +275,23 @@ function getTrackerData() {
   const urlIdx = headers.indexOf("Url");
   const seenIdx = headers.indexOf("FirstSeenDate");
 
-  const byKeyword = {};
-  KEYWORDS.forEach(function (k) { byKeyword[k] = []; });
+  const matches = data.filter(function (row) { return row[kwIdx] === keyword; });
+  matches.reverse(); // rows are appended oldest -> newest; newest first for display
 
-  data.forEach(function (row) {
-    const kw = row[kwIdx];
-    if (!byKeyword[kw]) byKeyword[kw] = [];
-    byKeyword[kw].push({
+  const page = matches.slice(offset, offset + limit).map(function (row) {
+    return {
       title: row[titleIdx],
       source: row[sourceIdx],
       pubDate: row[pubIdx],
       url: row[urlIdx],
       firstSeen: row[seenIdx],
-    });
+    };
   });
 
-  Object.keys(byKeyword).forEach(function (kw) {
-    byKeyword[kw].reverse(); // rows are appended oldest -> newest; newest first for display
-    if (byKeyword[kw].length > HISTORY_DISPLAY_CAP) {
-      byKeyword[kw] = byKeyword[kw].slice(0, HISTORY_DISPLAY_CAP);
-    }
-  });
-
-  return JSON.parse(JSON.stringify({ keywords: KEYWORDS, articles: byKeyword }));
+  return JSON.parse(JSON.stringify({
+    items: page,
+    hasMore: offset + limit < matches.length,
+  }));
 }
 
 // ---- Email composition (plain title + URL, no summary) ----

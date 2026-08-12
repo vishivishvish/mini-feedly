@@ -15,9 +15,10 @@ Keep this list current whenever a feature is added or changed.
   is appended to a Sheet (deduped by URL, per keyword), so re-running never
   creates duplicates of a story Google News re-surfaces on a later day.
 - **Web app tracker** (`doGet`) - a Feedly-style page with one section per
-  keyword, showing that keyword's full history newest-first (capped at
-  `HISTORY_DISPLAY_CAP` per keyword on the page for load speed - the Sheet
-  itself keeps everything, uncapped).
+  keyword, showing that keyword's history newest-first, `PAGE_SIZE` articles
+  at a time with a "See More" button to pull the next `PAGE_SIZE` from the
+  Sheet - the Sheet itself keeps everything, and paging never re-fetches
+  articles already loaded.
 - **Daily 9am digest email** - plain title + real publisher URL for up to
   `MAX_ITEMS_PER_KEYWORD` articles per keyword from the previous-day-to-today
   window, one section per keyword, dark "command center" styled HTML with a
@@ -48,10 +49,12 @@ this repo directly - paste both files into the Apps Script editor,
    plain-text fallback body (`composeDigestEmail`).
 
 **Web app (`doGet` / `Index.html`):** a sidebar of tracked keywords (each
-with an article count) and a main panel listing the selected keyword's full
-history, newest first, each entry showing source, title, link, and the date
-it was first tracked. Reads directly from the `Articles` Sheet via
-`getTrackerData()` - no separate data store from the daily digest.
+with its total article count, via `getKeywordCounts()`) and a main panel
+listing the selected keyword's history newest first, `PAGE_SIZE` articles at
+a time, each entry showing source, title, link, and the date it was first
+tracked. Switching keywords or clicking "See More" calls `getArticlesPage()`
+for the next batch. Reads directly from the `Articles` Sheet - no separate
+data store from the daily digest.
 
 ### One-time setup
 
@@ -86,11 +89,11 @@ it was first tracked. Reads directly from the `Articles` Sheet via
 ### Config constants (top of `mini-feedly.gs`)
 
 - `KEYWORDS` - array of tracked search keywords (default
-  `["Artificial Intelligence"]`)
+  `["Artificial Intelligence", "Robotics"]`)
 - `MAX_ITEMS_PER_KEYWORD` - max articles fetched/emailed per keyword per run
   (default 10)
-- `HISTORY_DISPLAY_CAP` - max articles shown per keyword on the web app page
-  (default 200; the Sheet keeps everything regardless)
+- `PAGE_SIZE` - how many articles the web app loads per keyword per "See
+  More" click (default 20)
 - `RECIPIENT_EMAIL` - who gets the daily digest email
 
 ## Reference implementation: `fetch_digest.py`

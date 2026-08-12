@@ -132,6 +132,24 @@
     font-size: 14px;
     padding: 20px 0;
   }
+
+  .see-more-btn {
+    display: block;
+    width: 100%;
+    background: #111820;
+    border: 1px solid #1f2732;
+    color: #8b949e;
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+  .see-more-btn:hover { color: #e6edf3; border-color: #3fb950; }
+  .see-more-btn:disabled { cursor: default; opacity: 0.6; }
 </style>
 </head>
 <body>
@@ -151,8 +169,14 @@
   </div>
 
 <script>
-  var trackerData = { keywords: [], articles: {} };
+  var PAGE_SIZE = 20;
+
+  var keywordsData = { keywords: [], counts: {} };
   var activeKeyword = null;
+  var currentArticles = [];
+  var currentOffset = 0;
+  var hasMore = false;
+  var loadingMore = false;
 
   function escapeHtml(str) {
     return String(str == null ? "" : str)
@@ -166,12 +190,12 @@
 
   function renderSidebar() {
     var sidebar = document.getElementById("sidebar");
-    if (trackerData.keywords.length === 0) {
+    if (keywordsData.keywords.length === 0) {
       sidebar.innerHTML = '<div class="empty-state" style="padding:0 24px;">No keywords tracked yet.</div>';
       return;
     }
-    sidebar.innerHTML = trackerData.keywords.map(function (kw) {
-      var count = (trackerData.articles[kw] || []).length;
+    sidebar.innerHTML = keywordsData.keywords.map(function (kw) {
+      var count = keywordsData.counts[kw] || 0;
       return (
         '<div class="kw-item' + (kw === activeKeyword ? " active" : "") + '" data-keyword="' + escapeHtml(kw) + '">' +
           '<span>' + escapeHtml(kw) + "</span>" +
@@ -183,20 +207,20 @@
 
   function renderMain() {
     var main = document.getElementById("main");
-    var articles = trackerData.articles[activeKeyword] || [];
+    var totalCount = keywordsData.counts[activeKeyword] || 0;
 
     var headerHtml =
       '<div class="main-header">' +
         '<div class="main-title">' + escapeHtml(activeKeyword || "") + "</div>" +
-        '<div class="main-sub">' + articles.length + " article(s) tracked · newest first</div>" +
+        '<div class="main-sub">' + totalCount + " article(s) tracked · newest first</div>" +
       "</div>";
 
-    if (articles.length === 0) {
+    if (currentArticles.length === 0) {
       main.innerHTML = headerHtml + '<div class="empty-state">No articles tracked for this keyword yet - check back after tomorrow\'s 9am run.</div>';
       return;
     }
 
-    var cardsHtml = articles.map(function (a) {
+    var cardsHtml = currentArticles.map(function (a) {
       return (
         '<div class="article-card">' +
           '<div class="article-meta">' + escapeHtml((a.source || "UNKNOWN SOURCE").toUpperCase()) + "</div>" +
@@ -207,39 +231,76 @@
       );
     }).join("");
 
-    main.innerHTML = headerHtml + cardsHtml;
+    var seeMoreHtml = hasMore
+      ? '<button class="see-more-btn" id="seeMoreBtn"' + (loadingMore ? " disabled" : "") + '>' +
+        (loadingMore ? "Loading…" : "See More") + "</button>"
+      : "";
+
+    main.innerHTML = headerHtml + cardsHtml + seeMoreHtml;
   }
 
-  function loadTracker() {
+  function loadNextPage() {
+    if (loadingMore || !activeKeyword) return;
+    loadingMore = true;
+    renderMain();
+    google.script.run
+      .withSuccessHandler(function (data) {
+        loadingMore = false;
+        currentArticles = currentArticles.concat(data.items);
+        currentOffset += data.items.length;
+        hasMore = data.hasMore;
+        renderMain();
+      })
+      .withFailureHandler(function (err) {
+        console.error(err);
+        loadingMore = false;
+        renderMain();
+      })
+      .getArticlesPage(activeKeyword, currentOffset, PAGE_SIZE);
+  }
+
+  function loadFirstPage() {
+    currentArticles = [];
+    currentOffset = 0;
+    hasMore = false;
+    document.getElementById("main").innerHTML = '<div class="empty-state">Loading articles…</div>';
+    loadNextPage();
+  }
+
+  function loadKeywords() {
     document.getElementById("sidebar").innerHTML = '<div class="empty-state" style="padding:0 24px;">Loading keywords…</div>';
     document.getElementById("main").innerHTML = '<div class="empty-state">Loading articles…</div>';
     google.script.run
       .withSuccessHandler(function (data) {
-        trackerData = data || { keywords: [], articles: {} };
-        if (!activeKeyword || trackerData.keywords.indexOf(activeKeyword) === -1) {
-          activeKeyword = trackerData.keywords[0] || null;
+        keywordsData = data || { keywords: [], counts: {} };
+        if (!activeKeyword || keywordsData.keywords.indexOf(activeKeyword) === -1) {
+          activeKeyword = keywordsData.keywords[0] || null;
         }
         renderSidebar();
-        renderMain();
+        if (activeKeyword) loadFirstPage();
       })
       .withFailureHandler(function (err) {
         console.error(err);
         document.getElementById("main").innerHTML = '<div class="empty-state">Failed to load - check the Apps Script execution log.</div>';
       })
-      .getTrackerData();
+      .getKeywordCounts();
   }
 
   document.getElementById("sidebar").addEventListener("click", function (e) {
     var el = e.target.closest(".kw-item");
-    if (!el) return;
+    if (!el || el.getAttribute("data-keyword") === activeKeyword) return;
     activeKeyword = el.getAttribute("data-keyword");
     renderSidebar();
-    renderMain();
+    loadFirstPage();
   });
 
-  document.getElementById("refreshBtn").addEventListener("click", loadTracker);
+  document.getElementById("main").addEventListener("click", function (e) {
+    if (e.target.id === "seeMoreBtn") loadNextPage();
+  });
 
-  loadTracker();
+  document.getElementById("refreshBtn").addEventListener("click", loadKeywords);
+
+  loadKeywords();
 </script>
 
 </body>
