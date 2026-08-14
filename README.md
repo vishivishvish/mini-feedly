@@ -27,6 +27,10 @@ Keep this list current whenever a feature is added or changed.
 - **Real URL resolution** - Google News wraps links behind a client-side
   redirect; `resolveRealUrl` replicates Google's internal `batchexecute` RPC
   to get the real publisher URL from a headless script.
+- **Client-side filter box** - a search input above the article list filters
+  the currently-loaded articles by title/source as you type, entirely in the
+  browser (no server round-trip, no new Sheet columns). Only searches
+  articles already paged in - it doesn't query the Sheet for older ones.
 
 ## Deployed pipeline: Google Apps Script (`mini-feedly.gs` + `Index.html`)
 
@@ -53,8 +57,10 @@ with its total article count, via `getKeywordCounts()`) and a main panel
 listing the selected keyword's history newest first, `PAGE_SIZE` articles at
 a time, each entry showing source, title, link, and the date it was first
 tracked. Switching keywords or clicking "See More" calls `getArticlesPage()`
-for the next batch. Reads directly from the `Articles` Sheet - no separate
-data store from the daily digest.
+for the next batch. A search box above the list filters whatever's currently
+loaded (title/source, case-insensitive) purely client-side - switching
+keywords or loading a fresh page resets it. Reads directly from the
+`Articles` Sheet - no separate data store from the daily digest.
 
 ### One-time setup
 

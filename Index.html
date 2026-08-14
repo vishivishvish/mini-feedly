@@ -90,6 +90,20 @@
     color: #8b949e;
     margin-top: 4px;
   }
+  .search-input {
+    display: block;
+    width: 100%;
+    max-width: 320px;
+    background: #111820;
+    border: 1px solid #1f2732;
+    color: #e6edf3;
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    margin-top: 12px;
+  }
+  .search-input::placeholder { color: #5b6472; }
+  .search-input:focus { outline: none; border-color: #3fb950; }
 
   .article-card {
     background: #111820;
@@ -163,8 +177,11 @@
     <div class="sidebar" id="sidebar">
       <div class="empty-state">Loading keywords…</div>
     </div>
-    <div class="main" id="main">
-      <div class="empty-state">Loading articles…</div>
+    <div class="main">
+      <div class="main-header" id="mainHeader"></div>
+      <div id="articleList">
+        <div class="empty-state">Loading articles…</div>
+      </div>
     </div>
   </div>
 
@@ -177,6 +194,7 @@
   var currentOffset = 0;
   var hasMore = false;
   var loadingMore = false;
+  var searchQuery = "";
 
   function escapeHtml(str) {
     return String(str == null ? "" : str)
@@ -205,22 +223,44 @@
     }).join("");
   }
 
-  function renderMain() {
-    var main = document.getElementById("main");
-    var totalCount = keywordsData.counts[activeKeyword] || 0;
+  function filterArticles(articles, query) {
+    if (!query) return articles;
+    var q = query.toLowerCase();
+    return articles.filter(function (a) {
+      return (a.title || "").toLowerCase().indexOf(q) !== -1 ||
+        (a.source || "").toLowerCase().indexOf(q) !== -1;
+    });
+  }
 
-    var headerHtml =
-      '<div class="main-header">' +
-        '<div class="main-title">' + escapeHtml(activeKeyword || "") + "</div>" +
-        '<div class="main-sub">' + totalCount + " article(s) tracked · newest first</div>" +
-      "</div>";
+  // Rebuilds the title/count/search-box block. Only called on keyword
+  // switch or initial load - never on a search keystroke, so the input
+  // itself is never re-created (which would drop focus/cursor position).
+  function renderHeader() {
+    var totalCount = keywordsData.counts[activeKeyword] || 0;
+    document.getElementById("mainHeader").innerHTML =
+      '<div class="main-title">' + escapeHtml(activeKeyword || "") + "</div>" +
+      '<div class="main-sub">' + totalCount + " article(s) tracked · newest first</div>" +
+      '<input type="text" id="searchInput" class="search-input" ' +
+        'placeholder="Filter loaded articles by title or source…" value="' + escapeHtml(searchQuery) + '">';
+  }
+
+  // Rebuilds just the article cards + See More button, filtered by
+  // searchQuery. Safe to call on every keystroke.
+  function renderArticleList() {
+    var container = document.getElementById("articleList");
 
     if (currentArticles.length === 0) {
-      main.innerHTML = headerHtml + '<div class="empty-state">No articles tracked for this keyword yet - check back after tomorrow\'s 9am run.</div>';
+      container.innerHTML = '<div class="empty-state">No articles tracked for this keyword yet - check back after tomorrow\'s 9am run.</div>';
       return;
     }
 
-    var cardsHtml = currentArticles.map(function (a) {
+    var filtered = filterArticles(currentArticles, searchQuery);
+    if (filtered.length === 0) {
+      container.innerHTML = '<div class="empty-state">No loaded articles match "' + escapeHtml(searchQuery) + '".</div>';
+      return;
+    }
+
+    var cardsHtml = filtered.map(function (a) {
       return (
         '<div class="article-card">' +
           '<div class="article-meta">' + escapeHtml((a.source || "UNKNOWN SOURCE").toUpperCase()) + "</div>" +
@@ -236,25 +276,25 @@
         (loadingMore ? "Loading…" : "See More") + "</button>"
       : "";
 
-    main.innerHTML = headerHtml + cardsHtml + seeMoreHtml;
+    container.innerHTML = cardsHtml + seeMoreHtml;
   }
 
   function loadNextPage() {
     if (loadingMore || !activeKeyword) return;
     loadingMore = true;
-    renderMain();
+    renderArticleList();
     google.script.run
       .withSuccessHandler(function (data) {
         loadingMore = false;
         currentArticles = currentArticles.concat(data.items);
         currentOffset += data.items.length;
         hasMore = data.hasMore;
-        renderMain();
+        renderArticleList();
       })
       .withFailureHandler(function (err) {
         console.error(err);
         loadingMore = false;
-        renderMain();
+        renderArticleList();
       })
       .getArticlesPage(activeKeyword, currentOffset, PAGE_SIZE);
   }
@@ -263,13 +303,15 @@
     currentArticles = [];
     currentOffset = 0;
     hasMore = false;
-    document.getElementById("main").innerHTML = '<div class="empty-state">Loading articles…</div>';
+    searchQuery = "";
+    renderHeader();
+    document.getElementById("articleList").innerHTML = '<div class="empty-state">Loading articles…</div>';
     loadNextPage();
   }
 
   function loadKeywords() {
     document.getElementById("sidebar").innerHTML = '<div class="empty-state" style="padding:0 24px;">Loading keywords…</div>';
-    document.getElementById("main").innerHTML = '<div class="empty-state">Loading articles…</div>';
+    document.getElementById("articleList").innerHTML = '<div class="empty-state">Loading articles…</div>';
     google.script.run
       .withSuccessHandler(function (data) {
         keywordsData = data || { keywords: [], counts: {} };
@@ -281,7 +323,7 @@
       })
       .withFailureHandler(function (err) {
         console.error(err);
-        document.getElementById("main").innerHTML = '<div class="empty-state">Failed to load - check the Apps Script execution log.</div>';
+        document.getElementById("articleList").innerHTML = '<div class="empty-state">Failed to load - check the Apps Script execution log.</div>';
       })
       .getKeywordCounts();
   }
@@ -294,7 +336,13 @@
     loadFirstPage();
   });
 
-  document.getElementById("main").addEventListener("click", function (e) {
+  document.getElementById("mainHeader").addEventListener("input", function (e) {
+    if (e.target.id !== "searchInput") return;
+    searchQuery = e.target.value;
+    renderArticleList();
+  });
+
+  document.getElementById("articleList").addEventListener("click", function (e) {
     if (e.target.id === "seeMoreBtn") loadNextPage();
   });
 
