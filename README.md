@@ -87,7 +87,9 @@ keywords or loading a fresh page resets it. Reads directly from the
 ### Data model (Sheet, auto-created on first run)
 
 - `Articles`: Keyword, Title, Source, PubDate, Url, FirstSeenDate (`Url` is
-  the resolved real publisher URL, not the Google News redirect link)
+  the resolved real publisher URL, not the Google News redirect link;
+  `Keyword` must match a `KEYWORDS` entry exactly, case-sensitive, or the
+  web app won't group that row under any sidebar entry)
 - The Sheet is referenced by its permanent Drive file ID (stored in this
   script's Script Properties), never by path, so it can be moved between
   Drive folders at any time without breaking anything.
