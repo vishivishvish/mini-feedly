@@ -101,7 +101,7 @@ keywords or loading a fresh page resets it. Reads directly from the
 - `MAX_ITEMS_PER_KEYWORD` - max articles fetched/emailed per keyword per run
   (default 10)
 - `PAGE_SIZE` - how many articles the web app loads per keyword per "See
-  More" click (default 20)
+  More" click, and how many load on first open of a keyword (default 20)
 - `RECIPIENT_EMAIL` - who gets the daily digest email
 
 ## Reference implementation: `fetch_digest.py`
