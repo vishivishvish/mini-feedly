@@ -164,6 +164,11 @@ function parseFeedItems(xmlText, maxItems) {
 
     items.push({ title: title, link: link, pubDate: pubDateStr, source: source });
   }
+
+  // Google News RSS is usually already newest-first, but don't rely on
+  // that implicitly - sort explicitly so downstream ordering (Sheet
+  // insertion, web app display) is correct regardless of feed order.
+  items.sort(function (a, b) { return new Date(b.pubDate) - new Date(a.pubDate); });
   return items;
 }
 
@@ -263,7 +268,10 @@ function ensureSummaryColumn_(sheet) {
  * Appends only the articles not already stored for this keyword, deduped by
  * URL. Google News frequently re-surfaces the same story across days, so
  * without this the Sheet (and the web app's history) would fill up with
- * repeats of the same article.
+ * repeats of the same article. New rows are inserted right below the
+ * header rather than appended at the bottom, so the Sheet itself reads
+ * newest-first top-to-bottom (matching `items`, which is already sorted
+ * newest-first by `parseFeedItems`) instead of oldest-first.
  */
 function appendNewArticles_(keyword, items) {
   const sheet = getArticlesSheet_();
@@ -274,11 +282,16 @@ function appendNewArticles_(keyword, items) {
   }
 
   const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+  const newRows = [];
   items.forEach(function (it) {
     if (existingUrls[it.url]) return;
-    sheet.appendRow([keyword, it.title, it.source, it.pubDate, it.url, today, it.summary || SUMMARY_NOT_AVAILABLE]);
+    newRows.push([keyword, it.title, it.source, it.pubDate, it.url, today, it.summary || SUMMARY_NOT_AVAILABLE]);
     existingUrls[it.url] = true;
   });
+
+  if (newRows.length === 0) return;
+  sheet.insertRowsBefore(2, newRows.length);
+  sheet.getRange(2, 1, newRows.length, newRows[0].length).setValues(newRows);
 }
 
 /**
@@ -519,7 +532,10 @@ function getArticlesPage(keyword, offset, limit) {
   const summaryIdx = headers.indexOf("Summary");
 
   const matches = data.filter(function (row) { return row[kwIdx] === keyword; });
-  matches.reverse(); // rows are appended oldest -> newest; newest first for display
+  // Sort explicitly by parsed PubDate, newest first - don't rely on Sheet
+  // row order (insertion order can't be assumed reliable across manual
+  // edits, migrations, or rows added before this sort existed).
+  matches.sort(function (a, b) { return new Date(b[pubIdx]) - new Date(a[pubIdx]); });
 
   const page = matches.slice(offset, offset + limit).map(function (row) {
     return {
