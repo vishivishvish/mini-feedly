@@ -31,6 +31,14 @@ Keep this list current whenever a feature is added or changed.
   the currently-loaded articles by title/source as you type, entirely in the
   browser (no server round-trip, no new Sheet columns). Only searches
   articles already paged in - it doesn't query the Sheet for older ones.
+- **AI article summaries** (`summarizeArticles`, run manually) - for every
+  Sheet row missing a Summary, best-effort extracts the article's text from
+  its real publisher URL and asks NVIDIA's Nemotron 3 Ultra API
+  (`nvidia/nemotron-3-ultra-550b-a55b`) for a 2-3 sentence summary,
+  respecting NVIDIA's 40-requests/minute rate limit. Rows whose text can't
+  be extracted (paywalls, JS-rendered pages, blocks) get "Summary Not
+  Available" instead of an API call. The web app shows whatever's in that
+  column below the article title.
 
 ## Deployed pipeline: Google Apps Script (`mini-feedly.gs` + `Index.html`)
 
@@ -59,8 +67,24 @@ a time, each entry showing source, title, link, and the date it was first
 tracked. Switching keywords or clicking "See More" calls `getArticlesPage()`
 for the next batch. A search box above the list filters whatever's currently
 loaded (title/source, case-insensitive) purely client-side - switching
-keywords or loading a fresh page resets it. Reads directly from the
-`Articles` Sheet - no separate data store from the daily digest.
+keywords or loading a fresh page resets it. Each card also shows whatever's
+in that row's Summary column (from `summarizeArticles`, see below), if
+anything. Reads directly from the `Articles` Sheet - no separate data store
+from the daily digest.
+
+**Summarization (`summarizeArticles`, run manually, not on a trigger):** for
+every Sheet row with a blank Summary cell (oldest first, capped at
+`MAX_SUMMARIES_PER_RUN` per run so one run stays well within Apps Script's
+execution time limit), `extractArticleText_` best-effort scrapes the
+article's real publisher URL, then `summarizeWithNemotron_` sends the text
+to NVIDIA's Nemotron 3 Ultra chat completions API for a short summary. Rows
+whose text can't be extracted skip the API call entirely and get "Summary
+Not Available" written instead. Each result is written to the Sheet as soon
+as it's computed - if the run stops partway through (or hits the per-run
+cap), just run it again and it picks up wherever it left off. New rows added
+by `runDailyDigest` start with a blank Summary until `summarizeArticles` is
+run again - consider adding a second time-driven trigger for it if you want
+that to happen automatically rather than manually.
 
 ### One-time setup
 
@@ -82,13 +106,23 @@ keywords or loading a fresh page resets it. Reads directly from the
 7. To ship code changes later **without changing that URL**: **Deploy >
    Manage deployments** > pick the existing deployment > pencil/Edit icon >
    Version: **New version** > Deploy.
+8. **Project Settings > Script Properties** -> add a property named
+   `NVIDIA_API_KEY` with a key from [build.nvidia.com](https://build.nvidia.com).
+   Never put the key directly in `mini-feedly.gs` - this repo is public.
+   Run `summarizeArticles` manually (function dropdown in the editor) any
+   time you want summaries backfilled for rows that don't have one yet.
 
 ### Data model (Sheet, auto-created on first run)
 
-- `Articles`: Keyword, Title, Source, PubDate, Url, FirstSeenDate (`Url` is
-  the resolved real publisher URL, not the Google News redirect link;
-  `Keyword` must match a `KEYWORDS` entry exactly, case-sensitive, or the
-  web app won't group that row under any sidebar entry)
+- `Articles`: Keyword, Title, Source, PubDate, Url, FirstSeenDate, Summary
+  (`Url` is the resolved real publisher URL, not the Google News redirect
+  link; `Keyword` must match a `KEYWORDS` entry exactly, case-sensitive, or
+  the web app won't group that row under any sidebar entry; `Summary` is
+  blank until `summarizeArticles` runs, then holds either an NVIDIA-
+  generated summary or "Summary Not Available")
+- Sheets created before summarization existed get the `Summary` column
+  added automatically the next time the sheet is opened by the script
+  (`ensureSummaryColumn_`) - no manual migration needed.
 - The Sheet is referenced by its permanent Drive file ID (stored in this
   script's Script Properties), never by path, so it can be moved between
   Drive folders at any time without breaking anything.
@@ -102,6 +136,18 @@ keywords or loading a fresh page resets it. Reads directly from the
 - `PAGE_SIZE` - how many articles the web app loads per keyword per "See
   More" click, and how many load on first open of a keyword (default 20)
 - `RECIPIENT_EMAIL` - who gets the daily digest email
+- `NVIDIA_MODEL` - which NVIDIA-hosted model `summarizeArticles` calls
+  (default `nvidia/nemotron-3-ultra-550b-a55b` - verify this slug still
+  matches the current listing at build.nvidia.com if NVIDIA renames it)
+- `NVIDIA_RATE_LIMIT_DELAY_MS` - pause between NVIDIA API calls, not between
+  every row (extraction failures skip both the call and the pause) (default
+  1600ms, ~37 requests/min, under NVIDIA's 40 RPM cap)
+- `MAX_SUMMARIES_PER_RUN` - cap on rows processed per `summarizeArticles`
+  run, to stay within Apps Script's execution time limit (default 150)
+- `MIN_EXTRACTED_TEXT_LENGTH` / `MAX_EXTRACTED_TEXT_LENGTH` - extracted
+  article text shorter than the min is treated as a failed extraction
+  (paywall/block page); text longer than the max gets truncated before
+  being sent to NVIDIA (defaults 400 / 6000 characters)
 
 ## Reference implementation: `fetch_digest.py`
 

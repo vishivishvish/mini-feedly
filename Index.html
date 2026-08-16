@@ -134,6 +134,16 @@
     word-break: break-all;
   }
   .article-link:hover { text-decoration: underline; }
+  .article-summary {
+    font-size: 13px;
+    color: #c9d1d9;
+    margin-top: 10px;
+    line-height: 1.6;
+  }
+  .article-summary.unavailable {
+    color: #5b6472;
+    font-style: italic;
+  }
   .article-date {
     font-family: 'Courier New', Consolas, monospace;
     font-size: 11px;
@@ -261,10 +271,17 @@
     }
 
     var cardsHtml = filtered.map(function (a) {
+      var summaryHtml = "";
+      if (a.summary) {
+        var unavailable = a.summary === "Summary Not Available";
+        summaryHtml = '<div class="article-summary' + (unavailable ? " unavailable" : "") + '">' +
+          escapeHtml(a.summary) + "</div>";
+      }
       return (
         '<div class="article-card">' +
           '<div class="article-meta">' + escapeHtml((a.source || "UNKNOWN SOURCE").toUpperCase()) + "</div>" +
           '<div class="article-title">' + escapeHtml(a.title) + "</div>" +
+          summaryHtml +
           '<a class="article-link" href="' + escapeHtml(a.url) + '" target="_blank" rel="noopener">' + displayUrl(a.url) + "</a>" +
           '<div class="article-date">First tracked ' + escapeHtml(a.firstSeen) + "</div>" +
         "</div>"

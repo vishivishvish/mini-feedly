@@ -1,7 +1,7 @@
 /**
  * mini-feedly - Google Apps Script version
  *
- * Two things running out of this one project:
+ * Three things running out of this one project:
  * 1. A daily 9am trigger (`runDailyDigest`) that fetches Google News RSS for
  *    each tracked keyword, resolves each Google News redirect link to the
  *    real publisher URL, appends any articles not already seen to a
@@ -12,6 +12,12 @@
  *    at a time (newest first) with a "See More" button to page through the
  *    rest - the Sheet itself keeps everything regardless of how much of it
  *    has been paged through.
+ * 3. An on-demand batch job (`summarizeArticles`, run manually) that, for
+ *    every Sheet row still missing a Summary, tries to extract the article's
+ *    text from its real publisher URL and asks NVIDIA's Nemotron 3 Ultra API
+ *    to summarize it, respecting NVIDIA's 40-requests/minute rate limit.
+ *    Rows whose text can't be extracted get "Summary Not Available" instead
+ *    of an API call. The web app shows whatever's in that column.
  *
  * SETUP (one-time):
  * 1. Paste this file and Index.html into an Apps Script project (Index.html
@@ -19,7 +25,7 @@
  * 2. Edit the `KEYWORDS` array below to the topics you want tracked.
  * 3. Run `runDailyDigest` once manually to authorize permissions (external
  *    requests, Sheets, send email) and create the backing Sheet on first run.
- * 4. Set project timezone to Asia/Calcutta (Project Settings) so a "9am"
+ * 4. Set project timezone to Asia/Kolkata (Project Settings) so a "9am"
  *    trigger means 9am IST.
  * 5. Triggers (clock icon) > Add Trigger > function: runDailyDigest,
  *    Time-driven, Day timer, 9am - 10am.
@@ -28,6 +34,11 @@
  * 7. To ship code changes later WITHOUT changing that URL: Deploy > Manage
  *    deployments > pick the existing deployment > Edit (pencil) > Version:
  *    New version > Deploy.
+ * 8. Project Settings > Script Properties > add `NVIDIA_API_KEY` with a key
+ *    from build.nvidia.com. Never put the key in this source file - it's
+ *    committed to a repo. Run `summarizeArticles` manually whenever you want
+ *    to backfill summaries for rows that don't have one yet (new rows added
+ *    by `runDailyDigest` start without a summary until this runs again).
  */
 
 const KEYWORDS = ["Artificial Intelligence", "Robotics"];
@@ -38,6 +49,19 @@ const RECIPIENT_EMAIL = "vishnu.subramanian1@mygreatlearning.com";
 const SHEET_NAMES = {
   ARTICLES: "Articles",
 };
+
+const ARTICLE_HEADERS = ["Keyword", "Title", "Source", "PubDate", "Url", "FirstSeenDate", "Summary"];
+
+// ---- Summarization (NVIDIA Nemotron 3 Ultra) ----
+
+const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+// Verify this slug still matches the current listing at build.nvidia.com if NVIDIA renames/retires it.
+const NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b";
+const NVIDIA_RATE_LIMIT_DELAY_MS = 1600; // ~37 requests/min, safely under NVIDIA's 40 RPM cap
+const MAX_SUMMARIES_PER_RUN = 150; // keeps one run comfortably within Apps Script's execution time limit
+const MIN_EXTRACTED_TEXT_LENGTH = 400; // shorter usually means a paywall/blocked fetch, not real article text
+const MAX_EXTRACTED_TEXT_LENGTH = 6000; // keeps the summarization prompt small and fast
+const SUMMARY_NOT_AVAILABLE = "Summary Not Available";
 
 // ---- Daily digest: fetch, dedupe/append to Sheet, email ----
 
@@ -185,7 +209,7 @@ function getSheetId_() {
 
   const ss = SpreadsheetApp.create("mini-feedly Data");
   const sheet = ss.insertSheet(SHEET_NAMES.ARTICLES);
-  sheet.appendRow(["Keyword", "Title", "Source", "PubDate", "Url", "FirstSeenDate"]);
+  sheet.appendRow(ARTICLE_HEADERS);
   sheet.setFrozenRows(1);
 
   const defaultSheet = ss.getSheetByName("Sheet1");
@@ -201,10 +225,23 @@ function getArticlesSheet_() {
   var sheet = ss.getSheetByName(SHEET_NAMES.ARTICLES);
   if (!sheet) {
     sheet = ss.insertSheet(SHEET_NAMES.ARTICLES);
-    sheet.appendRow(["Keyword", "Title", "Source", "PubDate", "Url", "FirstSeenDate"]);
+    sheet.appendRow(ARTICLE_HEADERS);
     sheet.setFrozenRows(1);
   }
+  ensureSummaryColumn_(sheet);
   return sheet;
+}
+
+/**
+ * Adds the Summary column to sheets created before summarization existed.
+ * No-op once the column is already there.
+ */
+function ensureSummaryColumn_(sheet) {
+  const lastCol = sheet.getLastColumn();
+  const headers = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  if (headers.indexOf("Summary") === -1) {
+    sheet.getRange(1, headers.length + 1).setValue("Summary");
+  }
 }
 
 /**
@@ -227,6 +264,126 @@ function appendNewArticles_(keyword, items) {
     sheet.appendRow([keyword, it.title, it.source, it.pubDate, it.url, today]);
     existingUrls[it.url] = true;
   });
+}
+
+/**
+ * Best-effort plain-text extraction from an article's real publisher URL.
+ * News sites vary wildly (paywalls, JS-rendered content, anti-bot blocks),
+ * so this has no guarantee of success - it prefers an <article> tag if
+ * present, strips script/style/nav/footer and all remaining markup, and
+ * treats anything left under MIN_EXTRACTED_TEXT_LENGTH as a failed
+ * extraction (usually a paywall or block page, not real article text).
+ * Returns null on any failure so the caller can fall back cleanly.
+ */
+function extractArticleText_(url) {
+  try {
+    const resp = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" },
+    });
+    if (resp.getResponseCode() !== 200) return null;
+    const html = resp.getContentText();
+
+    const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+    const fragment = articleMatch ? articleMatch[1] : html;
+
+    const text = fragment
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+      .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&#39;|&rsquo;/g, "'")
+      .replace(/&quot;|&ldquo;|&rdquo;/g, '"')
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (text.length < MIN_EXTRACTED_TEXT_LENGTH) return null;
+    return text.slice(0, MAX_EXTRACTED_TEXT_LENGTH);
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Summarizes article text via NVIDIA's Nemotron 3 Ultra API. Returns null
+ * (not a throw) on any API failure so a single bad article can't abort the
+ * whole batch in summarizeArticles().
+ */
+function summarizeWithNemotron_(articleText) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty("NVIDIA_API_KEY");
+  if (!apiKey) throw new Error("NVIDIA_API_KEY Script Property is not set - see setup step 8 in the file header.");
+
+  const payload = {
+    model: NVIDIA_MODEL,
+    messages: [
+      { role: "system", content: "Summarize the given news article in 2-3 concise sentences. Return only the summary, no preamble or headings." },
+      { role: "user", content: articleText },
+    ],
+    temperature: 0.3,
+    max_tokens: 200,
+  };
+
+  const resp = UrlFetchApp.fetch(NVIDIA_API_URL, {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + apiKey },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+
+  if (resp.getResponseCode() !== 200) {
+    Logger.log("NVIDIA API error %s: %s", resp.getResponseCode(), resp.getContentText());
+    return null;
+  }
+
+  const data = JSON.parse(resp.getContentText());
+  const content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  return content ? content.trim() : null;
+}
+
+/**
+ * Run this manually whenever you want summaries backfilled. Walks every
+ * Sheet row still missing a Summary (oldest first), extracts article text,
+ * and either gets a Nemotron summary or falls back to
+ * SUMMARY_NOT_AVAILABLE - writing each result immediately so progress isn't
+ * lost if the run is interrupted. Only rows that actually reach the NVIDIA
+ * API are throttled (NVIDIA_RATE_LIMIT_DELAY_MS); extraction failures skip
+ * the delay since they never touch the rate limit. Capped at
+ * MAX_SUMMARIES_PER_RUN per run to stay well within Apps Script's execution
+ * time limit - just run it again to pick up where it left off.
+ */
+function summarizeArticles() {
+  const sheet = getArticlesSheet_();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const urlIdx = headers.indexOf("Url");
+  const summaryIdx = headers.indexOf("Summary");
+
+  var processed = 0;
+  for (var i = 1; i < data.length && processed < MAX_SUMMARIES_PER_RUN; i++) {
+    if (data[i][summaryIdx]) continue; // already summarized or already marked unavailable
+
+    const rowNum = i + 1; // 1-indexed sheet row
+    const url = data[i][urlIdx];
+    const articleText = extractArticleText_(url);
+
+    var summary;
+    if (!articleText) {
+      summary = SUMMARY_NOT_AVAILABLE;
+    } else {
+      summary = summarizeWithNemotron_(articleText) || SUMMARY_NOT_AVAILABLE;
+      Utilities.sleep(NVIDIA_RATE_LIMIT_DELAY_MS);
+    }
+
+    sheet.getRange(rowNum, summaryIdx + 1).setValue(summary);
+    processed++;
+  }
+
+  Logger.log("summarizeArticles: processed %s row(s).", processed);
 }
 
 // ---- Web app: Feedly-like per-keyword history ----
@@ -274,6 +431,7 @@ function getArticlesPage(keyword, offset, limit) {
   const pubIdx = headers.indexOf("PubDate");
   const urlIdx = headers.indexOf("Url");
   const seenIdx = headers.indexOf("FirstSeenDate");
+  const summaryIdx = headers.indexOf("Summary");
 
   const matches = data.filter(function (row) { return row[kwIdx] === keyword; });
   matches.reverse(); // rows are appended oldest -> newest; newest first for display
@@ -285,6 +443,7 @@ function getArticlesPage(keyword, offset, limit) {
       pubDate: row[pubIdx],
       url: row[urlIdx],
       firstSeen: row[seenIdx],
+      summary: row[summaryIdx] || "",
     };
   });
 
