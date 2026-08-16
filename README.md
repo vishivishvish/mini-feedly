@@ -41,7 +41,16 @@ Keep this list current whenever a feature is added or changed.
   whose batch call fails outright, get "Summary Not Available" instead.
   `summarizeArticles` (run manually) backfills the same way for Sheet rows
   tracked before this feature existed. The web app shows whatever's in that
-  column below the article title.
+  column below the article title. By default `summarizeArticles` only picks
+  up rows with a blank Summary cell, so a row already marked "Summary Not
+  Available" is left alone on future runs; set `RETRY_FAILED_SUMMARIES` to
+  `true` to have it also retry those rows instead of just blank ones.
+- **Per-article notes** - an "Add Notes"/"Edit Notes" button on every article
+  card opens a small text box; whatever you type is saved via
+  `saveArticleNote` to that row's `Notes` column (matched by keyword + URL)
+  and shown in italic, pale-yellow text below the summary from then on.
+  Purely personal annotations - never sent to NVIDIA or included in the
+  digest email.
 
 ## Deployed pipeline: Google Apps Script (`mini-feedly.gs` + `Index.html`)
 
@@ -84,8 +93,10 @@ for the next batch. A search box above the list filters whatever's currently
 loaded (title/source, case-insensitive) purely client-side - switching
 keywords or loading a fresh page resets it. Each card also shows whatever's
 in that row's Summary column (from `summarizeArticles`, see below), if
-anything. Reads directly from the `Articles` Sheet - no separate data store
-from the daily digest.
+anything, plus an "Add Notes"/"Edit Notes" button that opens a text box for
+a personal note on that article - saved via `saveArticleNote()` and shown in
+italic, pale-yellow text below the summary. Reads directly from the
+`Articles` Sheet - no separate data store from the daily digest.
 
 **Summarization internals:** `extractArticleText_` best-effort scrapes an
 article's real publisher URL (prefers an `<article>` tag, strips
@@ -140,17 +151,19 @@ for new articles.
 
 ### Data model (Sheet, auto-created on first run)
 
-- `Articles`: Keyword, Title, Source, PubDate, Url, FirstSeenDate, Summary
-  (`Url` is the resolved real publisher URL, not the Google News redirect
-  link; `Keyword` must match a `KEYWORDS` entry exactly, case-sensitive, or
-  the web app won't group that row under any sidebar entry; `Summary` is
-  filled in by `runDailyDigest` itself for new rows - blank only for rows
-  tracked before summarization existed, until `summarizeArticles` backfills
-  them - and holds either an NVIDIA-generated summary or "Summary Not
-  Available")
-- Sheets created before summarization existed get the `Summary` column
-  added automatically the next time the sheet is opened by the script
-  (`ensureSummaryColumn_`) - no manual migration needed.
+- `Articles`: Keyword, Title, Source, PubDate, Url, FirstSeenDate, Summary,
+  Notes (`Url` is the resolved real publisher URL, not the Google News
+  redirect link; `Keyword` must match a `KEYWORDS` entry exactly,
+  case-sensitive, or the web app won't group that row under any sidebar
+  entry; `Summary` is filled in by `runDailyDigest` itself for new rows -
+  blank only for rows tracked before summarization existed, until
+  `summarizeArticles` backfills them - and holds either an NVIDIA-generated
+  summary or "Summary Not Available"; `Notes` is blank until you add one
+  from the web app)
+- Sheets created before summarization/notes existed get the `Summary` /
+  `Notes` columns added automatically the next time the sheet is opened by
+  the script (`ensureSummaryColumn_` / `ensureNotesColumn_`) - no manual
+  migration needed.
 - The Sheet is referenced by its permanent Drive file ID (stored in this
   script's Script Properties), never by path, so it can be moved between
   Drive folders at any time without breaking anything.
@@ -179,6 +192,9 @@ for new articles.
   article text shorter than the min is treated as a failed extraction
   (paywall/block page); text longer than the max gets truncated before
   being sent to NVIDIA (defaults 400 / 6000 characters)
+- `RETRY_FAILED_SUMMARIES` - when `true`, `summarizeArticles` treats rows
+  marked "Summary Not Available" as pending too, not just blank ones, so a
+  manual run retries them (default `false`)
 
 ## Reference implementation: `fetch_digest.py`
 

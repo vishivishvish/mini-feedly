@@ -56,7 +56,7 @@ const SHEET_NAMES = {
   ARTICLES: "Articles",
 };
 
-const ARTICLE_HEADERS = ["Keyword", "Title", "Source", "PubDate", "Url", "FirstSeenDate", "Summary"];
+const ARTICLE_HEADERS = ["Keyword", "Title", "Source", "PubDate", "Url", "FirstSeenDate", "Summary", "Notes"];
 
 // ---- Summarization (NVIDIA Nemotron 3 Ultra) ----
 
@@ -69,6 +69,7 @@ const MAX_SUMMARIES_PER_RUN = 150; // cap on rows summarizeArticles() processes 
 const MIN_EXTRACTED_TEXT_LENGTH = 400; // shorter usually means a paywall/blocked fetch, not real article text
 const MAX_EXTRACTED_TEXT_LENGTH = 6000; // keeps each article's share of the batch prompt small and fast
 const SUMMARY_NOT_AVAILABLE = "Summary Not Available";
+const RETRY_FAILED_SUMMARIES = false; // when true, summarizeArticles() also retries rows currently marked SUMMARY_NOT_AVAILABLE, not just blank ones
 
 // ---- Daily digest: fetch, dedupe/append to Sheet, email ----
 
@@ -253,6 +254,7 @@ function getArticlesSheet_() {
     sheet.setFrozenRows(1);
   }
   ensureSummaryColumn_(sheet);
+  ensureNotesColumn_(sheet);
   return sheet;
 }
 
@@ -265,6 +267,18 @@ function ensureSummaryColumn_(sheet) {
   const headers = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
   if (headers.indexOf("Summary") === -1) {
     sheet.getRange(1, headers.length + 1).setValue("Summary");
+  }
+}
+
+/**
+ * Adds the Notes column to sheets created before the notes feature existed.
+ * No-op once the column is already there.
+ */
+function ensureNotesColumn_(sheet) {
+  const lastCol = sheet.getLastColumn();
+  const headers = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  if (headers.indexOf("Notes") === -1) {
+    sheet.getRange(1, headers.length + 1).setValue("Notes");
   }
 }
 
@@ -458,6 +472,8 @@ function summarizeInBatches_(items) {
  * MAX_SUMMARIES_PER_RUN) in chunks of SUMMARIZE_BATCH_SIZE, writing each
  * chunk's results to the Sheet immediately so progress survives an
  * interrupted run - just run it again to pick up any rows still pending.
+ * When RETRY_FAILED_SUMMARIES is true, rows currently marked
+ * SUMMARY_NOT_AVAILABLE are treated as pending too, not just blank ones.
  */
 function summarizeArticles() {
   const sheet = getArticlesSheet_();
@@ -469,7 +485,9 @@ function summarizeArticles() {
 
   const pending = [];
   for (var i = 1; i < data.length && pending.length < MAX_SUMMARIES_PER_RUN; i++) {
-    if (data[i][summaryIdx]) continue; // already summarized or already marked unavailable
+    const cell = data[i][summaryIdx];
+    const isPending = !cell || (RETRY_FAILED_SUMMARIES && cell === SUMMARY_NOT_AVAILABLE);
+    if (!isPending) continue;
     pending.push({ rowNum: i + 1, item: { title: data[i][titleIdx], url: data[i][urlIdx] } });
   }
 
@@ -536,6 +554,7 @@ function getArticlesPage(keyword, offset, limit) {
   const urlIdx = headers.indexOf("Url");
   const seenIdx = headers.indexOf("FirstSeenDate");
   const summaryIdx = headers.indexOf("Summary");
+  const notesIdx = headers.indexOf("Notes");
 
   const matches = data.filter(function (row) { return row[kwIdx] === keyword; });
   // Sort explicitly by parsed PubDate, newest first - don't rely on Sheet
@@ -551,6 +570,7 @@ function getArticlesPage(keyword, offset, limit) {
       url: row[urlIdx],
       firstSeen: row[seenIdx],
       summary: row[summaryIdx] || "",
+      notes: row[notesIdx] || "",
     };
   });
 
@@ -558,6 +578,30 @@ function getArticlesPage(keyword, offset, limit) {
     items: page,
     hasMore: offset + limit < matches.length,
   }));
+}
+
+/**
+ * Saves a free-text note for one article, identified by keyword + URL (the
+ * same pair appendNewArticles_ dedupes on). Overwrites any existing note;
+ * an empty string clears it. Returns true if a matching row was found and
+ * updated, false otherwise (e.g. the article was somehow removed from the
+ * Sheet since the page was loaded).
+ */
+function saveArticleNote(keyword, url, note) {
+  const sheet = getArticlesSheet_();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const kwIdx = headers.indexOf("Keyword");
+  const urlIdx = headers.indexOf("Url");
+  const notesIdx = headers.indexOf("Notes");
+
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][kwIdx] === keyword && data[i][urlIdx] === url) {
+      sheet.getRange(i + 1, notesIdx + 1).setValue(note);
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---- Email composition (plain title + URL, no summary) ----
