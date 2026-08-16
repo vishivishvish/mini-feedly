@@ -144,12 +144,100 @@
     color: #5b6472;
     font-style: italic;
   }
+  .article-notes {
+    font-size: 13px;
+    font-style: italic;
+    color: #e3d089;
+    margin-top: 10px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
   .article-date {
     font-family: 'Courier New', Consolas, monospace;
     font-size: 11px;
     color: #5b6472;
     margin-top: 8px;
   }
+  .notes-btn {
+    background: none;
+    border: 1px solid #1f2732;
+    color: #8b949e;
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-top: 10px;
+  }
+  .notes-btn:hover { color: #e6edf3; border-color: #3fb950; }
+
+  .notes-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(5, 7, 10, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .notes-modal {
+    background: #0d1117;
+    border: 1px solid #1f2732;
+    border-radius: 8px;
+    padding: 20px;
+    width: 90%;
+    max-width: 440px;
+  }
+  .notes-modal-title {
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    color: #8b949e;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .notes-textarea {
+    width: 100%;
+    min-height: 120px;
+    background: #111820;
+    border: 1px solid #1f2732;
+    color: #e6edf3;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 10px;
+    border-radius: 6px;
+    resize: vertical;
+  }
+  .notes-textarea:focus { outline: none; border-color: #3fb950; }
+  .notes-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .notes-modal-actions button {
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .notes-cancel-btn {
+    background: none;
+    border: 1px solid #1f2732;
+    color: #8b949e;
+  }
+  .notes-cancel-btn:hover { color: #e6edf3; }
+  .notes-ok-btn {
+    background: #3fb950;
+    border: 1px solid #3fb950;
+    color: #05070a;
+    font-weight: 700;
+  }
+  .notes-ok-btn:hover { background: #2ea043; }
 
   .empty-state {
     color: #8b949e;
@@ -195,6 +283,8 @@
     </div>
   </div>
 
+  <div id="notesModalRoot"></div>
+
 <script>
   var PAGE_SIZE = 20;
 
@@ -205,6 +295,7 @@
   var hasMore = false;
   var loadingMore = false;
   var searchQuery = "";
+  var notesModalUrl = null;
 
   function escapeHtml(str) {
     return String(str == null ? "" : str)
@@ -277,13 +368,16 @@
         summaryHtml = '<div class="article-summary' + (unavailable ? " unavailable" : "") + '">' +
           escapeHtml(a.summary) + "</div>";
       }
+      var notesHtml = a.notes ? '<div class="article-notes">' + escapeHtml(a.notes) + "</div>" : "";
       return (
         '<div class="article-card">' +
           '<div class="article-meta">' + escapeHtml((a.source || "UNKNOWN SOURCE").toUpperCase()) + "</div>" +
           '<div class="article-title">' + escapeHtml(a.title) + "</div>" +
           summaryHtml +
+          notesHtml +
           '<a class="article-link" href="' + escapeHtml(a.url) + '" target="_blank" rel="noopener">' + displayUrl(a.url) + "</a>" +
           '<div class="article-date">First tracked ' + escapeHtml(a.firstSeen) + "</div>" +
+          '<button class="notes-btn" data-url="' + escapeHtml(a.url) + '">' + (a.notes ? "Edit Notes" : "Add Notes") + "</button>" +
         "</div>"
       );
     }).join("");
@@ -294,6 +388,64 @@
       : "";
 
     container.innerHTML = cardsHtml + seeMoreHtml;
+  }
+
+  function findArticleByUrl(url) {
+    for (var i = 0; i < currentArticles.length; i++) {
+      if (currentArticles[i].url === url) return currentArticles[i];
+    }
+    return null;
+  }
+
+  function renderNotesModal() {
+    var root = document.getElementById("notesModalRoot");
+    if (!notesModalUrl) {
+      root.innerHTML = "";
+      return;
+    }
+    var article = findArticleByUrl(notesModalUrl);
+    if (!article) {
+      notesModalUrl = null;
+      root.innerHTML = "";
+      return;
+    }
+    root.innerHTML =
+      '<div class="notes-modal-overlay" id="notesOverlay">' +
+        '<div class="notes-modal">' +
+          '<div class="notes-modal-title">Notes &middot; ' + escapeHtml(article.title) + "</div>" +
+          '<textarea class="notes-textarea" id="notesTextarea" placeholder="Type your notes for this article…">' +
+            escapeHtml(article.notes || "") +
+          "</textarea>" +
+          '<div class="notes-modal-actions">' +
+            '<button class="notes-cancel-btn" id="notesCancelBtn">Cancel</button>' +
+            '<button class="notes-ok-btn" id="notesOkBtn">OK</button>' +
+          "</div>" +
+        "</div>" +
+      "</div>";
+    document.getElementById("notesTextarea").focus();
+  }
+
+  function closeNotesModal() {
+    notesModalUrl = null;
+    renderNotesModal();
+  }
+
+  function saveNotesFromModal() {
+    var article = findArticleByUrl(notesModalUrl);
+    if (!article) { closeNotesModal(); return; }
+    var noteText = document.getElementById("notesTextarea").value;
+    var url = notesModalUrl;
+    google.script.run
+      .withSuccessHandler(function () {
+        article.notes = noteText;
+        closeNotesModal();
+        renderArticleList();
+      })
+      .withFailureHandler(function (err) {
+        console.error(err);
+        closeNotesModal();
+      })
+      .saveArticleNote(activeKeyword, url, noteText);
   }
 
   function loadNextPage() {
@@ -321,6 +473,7 @@
     currentOffset = 0;
     hasMore = false;
     searchQuery = "";
+    closeNotesModal();
     renderHeader();
     document.getElementById("articleList").innerHTML = '<div class="empty-state">Loading articles…</div>';
     loadNextPage();
@@ -361,6 +514,16 @@
 
   document.getElementById("articleList").addEventListener("click", function (e) {
     if (e.target.id === "seeMoreBtn") loadNextPage();
+    var notesBtn = e.target.closest(".notes-btn");
+    if (notesBtn) {
+      notesModalUrl = notesBtn.getAttribute("data-url");
+      renderNotesModal();
+    }
+  });
+
+  document.getElementById("notesModalRoot").addEventListener("click", function (e) {
+    if (e.target.id === "notesOverlay" || e.target.id === "notesCancelBtn") closeNotesModal();
+    if (e.target.id === "notesOkBtn") saveNotesFromModal();
   });
 
   document.getElementById("refreshBtn").addEventListener("click", loadKeywords);
