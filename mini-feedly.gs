@@ -86,7 +86,11 @@ function runDailyDigest() {
     keywordResults.forEach(function (r) { allItems.push.apply(allItems, r.items); });
     summarizeInBatches_(allItems);
 
-    keywordResults.forEach(function (r) { appendNewArticles_(r.keyword, r.items); });
+    // Reversed: each call inserts its block at row 2, so processing in
+    // reverse means the first keyword in KEYWORDS is inserted last and
+    // ends up on top - keeping this run's rows in KEYWORDS order
+    // top-to-bottom instead of reversed by the repeated row-2 insertion.
+    keywordResults.slice().reverse().forEach(function (r) { appendNewArticles_(r.keyword, r.items); });
 
     const subject = "mini-feedly Daily Digest - " + Utilities.formatDate(new Date(), "UTC", "yyyy-MM-dd");
     const textBody = composeDigestEmail(keywordResults);
@@ -291,7 +295,9 @@ function appendNewArticles_(keyword, items) {
 
   if (newRows.length === 0) return;
   sheet.insertRowsBefore(2, newRows.length);
-  sheet.getRange(2, 1, newRows.length, newRows[0].length).setValues(newRows);
+  const newRange = sheet.getRange(2, 1, newRows.length, newRows[0].length);
+  newRange.setValues(newRows);
+  newRange.setFontWeight("normal"); // insertRowsBefore can inherit the bold header row's formatting
 }
 
 /**
