@@ -52,7 +52,8 @@ this repo directly - paste both files into the Apps Script editor,
 **Daily digest (`runDailyDigest`, time-driven trigger):**
 1. For each keyword in `KEYWORDS`: fetch Google News RSS, filter to items
    published in the previous-day-to-today UTC window, cap at
-   `MAX_ITEMS_PER_KEYWORD`.
+   `MAX_ITEMS_PER_KEYWORD`, and sort them newest-first by parsed `PubDate`
+   (`parseFeedItems` doesn't trust Google's feed ordering implicitly).
 2. Resolve each Google News redirect link to the real publisher URL via
    Google's internal `batchexecute` RPC (no browser needed - works from a
    headless script).
@@ -63,7 +64,9 @@ this repo directly - paste both files into the Apps Script editor,
    to the Sheet.
 4. Append any article not already stored for that keyword (deduped by URL)
    to the `Articles` Sheet tab, tagged with the date it was first seen and
-   its summary (or "Summary Not Available").
+   its summary (or "Summary Not Available"). New rows are inserted right
+   below the header rather than appended at the bottom, so the Sheet itself
+   reads newest-first top-to-bottom.
 5. Email one digest covering every keyword: title + real URL for each of
    that keyword's articles from this run, sectioned by keyword, styled as a
    dark "command center" HTML dashboard (`composeDigestEmailHtml`) with a
@@ -72,9 +75,11 @@ this repo directly - paste both files into the Apps Script editor,
 
 **Web app (`doGet` / `Index.html`):** a sidebar of tracked keywords (each
 with its total article count, via `getKeywordCounts()`) and a main panel
-listing the selected keyword's history newest first, `PAGE_SIZE` articles at
-a time, each entry showing source, title, link, and the date it was first
-tracked. Switching keywords or clicking "See More" calls `getArticlesPage()`
+listing the selected keyword's history newest first (sorted explicitly by
+parsed `PubDate` in `getArticlesPage()`, not assumed from Sheet row order),
+`PAGE_SIZE` articles at a time, each entry showing source, title, link, and
+the date it was first tracked. Switching keywords or clicking "See More"
+calls `getArticlesPage()`
 for the next batch. A search box above the list filters whatever's currently
 loaded (title/source, case-insensitive) purely client-side - switching
 keywords or loading a fresh page resets it. Each card also shows whatever's
