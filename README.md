@@ -31,13 +31,16 @@ Keep this list current whenever a feature is added or changed.
   the currently-loaded articles by title/source as you type, entirely in the
   browser (no server round-trip, no new Sheet columns). Only searches
   articles already paged in - it doesn't query the Sheet for older ones.
-- **AI article summaries** (`summarizeArticles`, run manually) - for every
-  Sheet row missing a Summary, best-effort extracts the article's text from
-  its real publisher URL and asks NVIDIA's Nemotron 3 Ultra API
-  (`nvidia/nemotron-3-ultra-550b-a55b`) for a 2-3 sentence summary,
-  respecting NVIDIA's 40-requests/minute rate limit. Rows whose text can't
-  be extracted (paywalls, JS-rendered pages, blocks) get "Summary Not
-  Available" instead of an API call. The web app shows whatever's in that
+- **AI article summaries** - built into `runDailyDigest`, so summaries land
+  as soon as articles do: every article whose text can be extracted from its
+  real publisher URL goes into one batched request to NVIDIA's Nemotron 3
+  Ultra API (`nvidia/nemotron-3-ultra-550b-a55b`) - one JSON array of
+  articles in, one JSON object of summaries out - instead of a separate API
+  call per article, since NVIDIA rate-limits to 40 requests/minute. Articles
+  whose text can't be extracted (paywalls, JS-rendered pages, blocks), or
+  whose batch call fails outright, get "Summary Not Available" instead.
+  `summarizeArticles` (run manually) backfills the same way for Sheet rows
+  tracked before this feature existed. The web app shows whatever's in that
   column below the article title.
 
 ## Deployed pipeline: Google Apps Script (`mini-feedly.gs` + `Index.html`)
@@ -53,12 +56,19 @@ this repo directly - paste both files into the Apps Script editor,
 2. Resolve each Google News redirect link to the real publisher URL via
    Google's internal `batchexecute` RPC (no browser needed - works from a
    headless script).
-3. Append any article not already stored for that keyword (deduped by URL)
-   to the `Articles` Sheet tab, tagged with the date it was first seen.
-4. Email one digest covering every keyword: title + real URL for each of
+3. Pool every keyword's fresh items together and run them through
+   `summarizeInBatches_` - one batched Nemotron request per
+   `SUMMARIZE_BATCH_SIZE` items (a normal day's volume fits in a single
+   call), setting each item's summary in place before anything is written
+   to the Sheet.
+4. Append any article not already stored for that keyword (deduped by URL)
+   to the `Articles` Sheet tab, tagged with the date it was first seen and
+   its summary (or "Summary Not Available").
+5. Email one digest covering every keyword: title + real URL for each of
    that keyword's articles from this run, sectioned by keyword, styled as a
    dark "command center" HTML dashboard (`composeDigestEmailHtml`) with a
-   plain-text fallback body (`composeDigestEmail`).
+   plain-text fallback body (`composeDigestEmail`). Summarization failures
+   never affect this step - the email always sends.
 
 **Web app (`doGet` / `Index.html`):** a sidebar of tracked keywords (each
 with its total article count, via `getKeywordCounts()`) and a main panel
@@ -72,19 +82,28 @@ in that row's Summary column (from `summarizeArticles`, see below), if
 anything. Reads directly from the `Articles` Sheet - no separate data store
 from the daily digest.
 
-**Summarization (`summarizeArticles`, run manually, not on a trigger):** for
-every Sheet row with a blank Summary cell (oldest first, capped at
-`MAX_SUMMARIES_PER_RUN` per run so one run stays well within Apps Script's
-execution time limit), `extractArticleText_` best-effort scrapes the
-article's real publisher URL, then `summarizeWithNemotron_` sends the text
-to NVIDIA's Nemotron 3 Ultra chat completions API for a short summary. Rows
-whose text can't be extracted skip the API call entirely and get "Summary
-Not Available" written instead. Each result is written to the Sheet as soon
-as it's computed - if the run stops partway through (or hits the per-run
-cap), just run it again and it picks up wherever it left off. New rows added
-by `runDailyDigest` start with a blank Summary until `summarizeArticles` is
-run again - consider adding a second time-driven trigger for it if you want
-that to happen automatically rather than manually.
+**Summarization internals:** `extractArticleText_` best-effort scrapes an
+article's real publisher URL (prefers an `<article>` tag, strips
+script/style/nav/footer and remaining markup); text shorter than
+`MIN_EXTRACTED_TEXT_LENGTH` is treated as a failed extraction (usually a
+paywall or block page). `summarizeBatchWithNemotron_` sends one request for
+up to `SUMMARIZE_BATCH_SIZE` articles' extracted text - a JSON array of
+`{id, title, text}` in, a JSON object of `{id: summary}` out - and returns
+`null` (never throws) on a missing API key, HTTP error, or unparseable
+response. `summarizeBatch_` ties the two together for one chunk: articles
+with no extractable text get `SUMMARY_NOT_AVAILABLE` immediately; if the
+batch call itself fails, every article in that chunk falls back to
+`SUMMARY_NOT_AVAILABLE` too, per-article, not just the ones that failed
+extraction. `summarizeInBatches_` (used by `runDailyDigest`) chunks a list
+of fresh items and paces multiple chunks with `NVIDIA_RATE_LIMIT_DELAY_MS`;
+`summarizeArticles` (run manually) does the same for any Sheet rows with a
+blank Summary cell (oldest first, capped at `MAX_SUMMARIES_PER_RUN` per
+run), writing each chunk's results to the Sheet immediately so progress
+survives an interrupted run - for backfilling rows tracked before this
+feature existed or before `NVIDIA_API_KEY` was set. Rows added by
+`runDailyDigest` going forward already have a summary (or "Summary Not
+Available") by the time they're written - no separate backfill step needed
+for new articles.
 
 ### One-time setup
 
@@ -109,8 +128,10 @@ that to happen automatically rather than manually.
 8. **Project Settings > Script Properties** -> add a property named
    `NVIDIA_API_KEY` with a key from [build.nvidia.com](https://build.nvidia.com).
    Never put the key directly in `mini-feedly.gs` - this repo is public.
-   Run `summarizeArticles` manually (function dropdown in the editor) any
-   time you want summaries backfilled for rows that don't have one yet.
+   Without this property, `runDailyDigest` still runs fine - articles just
+   get "Summary Not Available" instead of a real summary. After adding the
+   key, run `summarizeArticles` manually once (function dropdown in the
+   editor) to backfill rows tracked before it was set.
 
 ### Data model (Sheet, auto-created on first run)
 
@@ -118,8 +139,10 @@ that to happen automatically rather than manually.
   (`Url` is the resolved real publisher URL, not the Google News redirect
   link; `Keyword` must match a `KEYWORDS` entry exactly, case-sensitive, or
   the web app won't group that row under any sidebar entry; `Summary` is
-  blank until `summarizeArticles` runs, then holds either an NVIDIA-
-  generated summary or "Summary Not Available")
+  filled in by `runDailyDigest` itself for new rows - blank only for rows
+  tracked before summarization existed, until `summarizeArticles` backfills
+  them - and holds either an NVIDIA-generated summary or "Summary Not
+  Available")
 - Sheets created before summarization existed get the `Summary` column
   added automatically the next time the sheet is opened by the script
   (`ensureSummaryColumn_`) - no manual migration needed.
@@ -136,12 +159,15 @@ that to happen automatically rather than manually.
 - `PAGE_SIZE` - how many articles the web app loads per keyword per "See
   More" click, and how many load on first open of a keyword (default 20)
 - `RECIPIENT_EMAIL` - who gets the daily digest email
-- `NVIDIA_MODEL` - which NVIDIA-hosted model `summarizeArticles` calls
-  (default `nvidia/nemotron-3-ultra-550b-a55b` - verify this slug still
-  matches the current listing at build.nvidia.com if NVIDIA renames it)
-- `NVIDIA_RATE_LIMIT_DELAY_MS` - pause between NVIDIA API calls, not between
-  every row (extraction failures skip both the call and the pause) (default
-  1600ms, ~37 requests/min, under NVIDIA's 40 RPM cap)
+- `NVIDIA_MODEL` - which NVIDIA-hosted model summarization calls (default
+  `nvidia/nemotron-3-ultra-550b-a55b` - verify this slug still matches the
+  current listing at build.nvidia.com if NVIDIA renames it)
+- `SUMMARIZE_BATCH_SIZE` - articles per single Nemotron request (default 20
+  - `KEYWORDS.length * MAX_ITEMS_PER_KEYWORD` stays under this by default,
+  so a normal `runDailyDigest` run needs exactly one summarization call)
+- `NVIDIA_RATE_LIMIT_DELAY_MS` - pause between batch calls, only when a run
+  needs more than one batch (default 1600ms, safely under NVIDIA's 40 RPM
+  cap)
 - `MAX_SUMMARIES_PER_RUN` - cap on rows processed per `summarizeArticles`
   run, to stay within Apps Script's execution time limit (default 150)
 - `MIN_EXTRACTED_TEXT_LENGTH` / `MAX_EXTRACTED_TEXT_LENGTH` - extracted

@@ -12,12 +12,17 @@
  *    at a time (newest first) with a "See More" button to page through the
  *    rest - the Sheet itself keeps everything regardless of how much of it
  *    has been paged through.
- * 3. An on-demand batch job (`summarizeArticles`, run manually) that, for
- *    every Sheet row still missing a Summary, tries to extract the article's
- *    text from its real publisher URL and asks NVIDIA's Nemotron 3 Ultra API
- *    to summarize it, respecting NVIDIA's 40-requests/minute rate limit.
- *    Rows whose text can't be extracted get "Summary Not Available" instead
- *    of an API call. The web app shows whatever's in that column.
+ * 3. Summarization via NVIDIA's Nemotron 3 Ultra API, wired into
+ *    `runDailyDigest` itself so summaries land as soon as articles do: every
+ *    article fetched in a run whose text can be extracted from its real
+ *    publisher URL goes into ONE batched Nemotron request (one JSON array
+ *    of articles in, one JSON object of summaries out) - not one request
+ *    per article, since NVIDIA rate-limits to 40 requests/minute. Articles
+ *    whose text can't be extracted, or whose batch call fails outright, get
+ *    "Summary Not Available" instead. `summarizeArticles` (run manually)
+ *    does the same thing in batches of `SUMMARIZE_BATCH_SIZE` for any Sheet
+ *    rows already tracked before this feature existed. The web app shows
+ *    whatever's in that column.
  *
  * SETUP (one-time):
  * 1. Paste this file and Index.html into an Apps Script project (Index.html
@@ -36,9 +41,10 @@
  *    New version > Deploy.
  * 8. Project Settings > Script Properties > add `NVIDIA_API_KEY` with a key
  *    from build.nvidia.com. Never put the key in this source file - it's
- *    committed to a repo. Run `summarizeArticles` manually whenever you want
- *    to backfill summaries for rows that don't have one yet (new rows added
- *    by `runDailyDigest` start without a summary until this runs again).
+ *    committed to a repo. Without this property set, `runDailyDigest` still
+ *    works normally - articles just get "Summary Not Available" instead of
+ *    a real summary. Run `summarizeArticles` manually once after adding the
+ *    key to backfill rows that were tracked before it was set.
  */
 
 const KEYWORDS = ["Artificial Intelligence", "Robotics"];
@@ -57,10 +63,11 @@ const ARTICLE_HEADERS = ["Keyword", "Title", "Source", "PubDate", "Url", "FirstS
 const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 // Verify this slug still matches the current listing at build.nvidia.com if NVIDIA renames/retires it.
 const NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b";
-const NVIDIA_RATE_LIMIT_DELAY_MS = 1600; // ~37 requests/min, safely under NVIDIA's 40 RPM cap
-const MAX_SUMMARIES_PER_RUN = 150; // keeps one run comfortably within Apps Script's execution time limit
+const SUMMARIZE_BATCH_SIZE = 20; // articles per single Nemotron request (one JSON in, one JSON out)
+const NVIDIA_RATE_LIMIT_DELAY_MS = 1600; // pause between batch calls when a run needs more than one, safely under NVIDIA's 40 RPM cap
+const MAX_SUMMARIES_PER_RUN = 150; // cap on rows summarizeArticles() processes per run, to stay within Apps Script's execution time limit
 const MIN_EXTRACTED_TEXT_LENGTH = 400; // shorter usually means a paywall/blocked fetch, not real article text
-const MAX_EXTRACTED_TEXT_LENGTH = 6000; // keeps the summarization prompt small and fast
+const MAX_EXTRACTED_TEXT_LENGTH = 6000; // keeps each article's share of the batch prompt small and fast
 const SUMMARY_NOT_AVAILABLE = "Summary Not Available";
 
 // ---- Daily digest: fetch, dedupe/append to Sheet, email ----
@@ -69,9 +76,17 @@ function runDailyDigest() {
   try {
     const keywordResults = KEYWORDS.map(function (keyword) {
       const items = fetchDigestItems(keyword, MAX_ITEMS_PER_KEYWORD);
-      appendNewArticles_(keyword, items);
       return { keyword: keyword, items: items };
     });
+
+    // One batched summarization pass across every keyword's fresh items
+    // together (not per keyword), so a normal day's volume fits in a single
+    // Nemotron request instead of several.
+    const allItems = [];
+    keywordResults.forEach(function (r) { allItems.push.apply(allItems, r.items); });
+    summarizeInBatches_(allItems);
+
+    keywordResults.forEach(function (r) { appendNewArticles_(r.keyword, r.items); });
 
     const subject = "mini-feedly Daily Digest - " + Utilities.formatDate(new Date(), "UTC", "yyyy-MM-dd");
     const textBody = composeDigestEmail(keywordResults);
@@ -261,7 +276,7 @@ function appendNewArticles_(keyword, items) {
   const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
   items.forEach(function (it) {
     if (existingUrls[it.url]) return;
-    sheet.appendRow([keyword, it.title, it.source, it.pubDate, it.url, today]);
+    sheet.appendRow([keyword, it.title, it.source, it.pubDate, it.url, today, it.summary || SUMMARY_NOT_AVAILABLE]);
     existingUrls[it.url] = true;
   });
 }
@@ -309,81 +324,151 @@ function extractArticleText_(url) {
 }
 
 /**
- * Summarizes article text via NVIDIA's Nemotron 3 Ultra API. Returns null
- * (not a throw) on any API failure so a single bad article can't abort the
- * whole batch in summarizeArticles().
+ * Sends ONE batched request to NVIDIA's Nemotron 3 Ultra API for up to
+ * SUMMARIZE_BATCH_SIZE articles at a time - a single JSON array of
+ * {id, title, text} in, a single JSON object of {id: summary} out - since
+ * NVIDIA rate-limits to 40 requests/minute and calling it once per article
+ * would burn through that fast. Returns null (never throws) on a missing
+ * API key, an HTTP error, or a response that isn't parseable JSON, so the
+ * caller can fall every article in the batch back to SUMMARY_NOT_AVAILABLE
+ * without the rest of the run (digest email, Sheet append) being affected.
  */
-function summarizeWithNemotron_(articleText) {
+function summarizeBatchWithNemotron_(articlesForPrompt) {
   const apiKey = PropertiesService.getScriptProperties().getProperty("NVIDIA_API_KEY");
-  if (!apiKey) throw new Error("NVIDIA_API_KEY Script Property is not set - see setup step 8 in the file header.");
+  if (!apiKey) {
+    Logger.log("NVIDIA_API_KEY Script Property is not set - skipping summarization.");
+    return null;
+  }
 
   const payload = {
     model: NVIDIA_MODEL,
     messages: [
-      { role: "system", content: "Summarize the given news article in 2-3 concise sentences. Return only the summary, no preamble or headings." },
-      { role: "user", content: articleText },
+      {
+        role: "system",
+        content:
+          'You will receive a JSON array of news articles, each with an "id", "title", and "text". ' +
+          'Reply with ONLY a single JSON object mapping each article\'s id (as a string) to a 2-3 ' +
+          'sentence summary of its text - no other text, no markdown formatting. ' +
+          'Example: {"0": "Summary of article 0...", "1": "Summary of article 1..."}',
+      },
+      { role: "user", content: JSON.stringify(articlesForPrompt) },
     ],
     temperature: 0.3,
-    max_tokens: 200,
+    max_tokens: 250 * articlesForPrompt.length + 200,
   };
 
-  const resp = UrlFetchApp.fetch(NVIDIA_API_URL, {
-    method: "post",
-    contentType: "application/json",
-    headers: { Authorization: "Bearer " + apiKey },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true,
-  });
+  try {
+    const resp = UrlFetchApp.fetch(NVIDIA_API_URL, {
+      method: "post",
+      contentType: "application/json",
+      headers: { Authorization: "Bearer " + apiKey },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true,
+    });
 
-  if (resp.getResponseCode() !== 200) {
-    Logger.log("NVIDIA API error %s: %s", resp.getResponseCode(), resp.getContentText());
+    if (resp.getResponseCode() !== 200) {
+      Logger.log("NVIDIA API error %s: %s", resp.getResponseCode(), resp.getContentText());
+      return null;
+    }
+
+    const data = JSON.parse(resp.getContentText());
+    const content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+    if (!content) return null;
+
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    return jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+  } catch (err) {
+    Logger.log("NVIDIA batch summarization failed: %s", err);
     return null;
   }
-
-  const data = JSON.parse(resp.getContentText());
-  const content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-  return content ? content.trim() : null;
 }
 
 /**
- * Run this manually whenever you want summaries backfilled. Walks every
- * Sheet row still missing a Summary (oldest first), extracts article text,
- * and either gets a Nemotron summary or falls back to
- * SUMMARY_NOT_AVAILABLE - writing each result immediately so progress isn't
- * lost if the run is interrupted. Only rows that actually reach the NVIDIA
- * API are throttled (NVIDIA_RATE_LIMIT_DELAY_MS); extraction failures skip
- * the delay since they never touch the rate limit. Capped at
- * MAX_SUMMARIES_PER_RUN per run to stay well within Apps Script's execution
- * time limit - just run it again to pick up where it left off.
+ * Extracts text and requests summaries for up to SUMMARIZE_BATCH_SIZE items
+ * in ONE Nemotron call, setting `.summary` on every item in place. Items
+ * whose text can't be extracted are marked SUMMARY_NOT_AVAILABLE without
+ * ever touching the API or the rate limit. If the batch call itself fails,
+ * every item that did have extractable text also falls back to
+ * SUMMARY_NOT_AVAILABLE - callers needing more than SUMMARIZE_BATCH_SIZE
+ * items are responsible for chunking and pacing between chunks.
+ */
+function summarizeBatch_(items) {
+  if (items.length === 0) return;
+
+  const candidates = [];
+  items.forEach(function (it) {
+    const text = extractArticleText_(it.url);
+    if (text) {
+      candidates.push({ item: it, text: text });
+    } else {
+      it.summary = SUMMARY_NOT_AVAILABLE;
+    }
+  });
+  if (candidates.length === 0) return;
+
+  const articlesForPrompt = candidates.map(function (c, i) {
+    return { id: i, title: c.item.title, text: c.text };
+  });
+  const summaries = summarizeBatchWithNemotron_(articlesForPrompt);
+
+  candidates.forEach(function (c, i) {
+    c.item.summary = summaries && summaries[i] ? String(summaries[i]) : SUMMARY_NOT_AVAILABLE;
+  });
+}
+
+/**
+ * Convenience wrapper for runDailyDigest: chunks `items` into groups of
+ * SUMMARIZE_BATCH_SIZE and runs summarizeBatch_ on each, pausing between
+ * chunks. A normal day's fetch (KEYWORDS.length * MAX_ITEMS_PER_KEYWORD)
+ * fits in a single chunk by default - exactly one Nemotron call - and this
+ * only degrades to multiple paced calls if KEYWORDS grows enough to exceed
+ * SUMMARIZE_BATCH_SIZE in one run.
+ */
+function summarizeInBatches_(items) {
+  for (var b = 0; b < items.length; b += SUMMARIZE_BATCH_SIZE) {
+    summarizeBatch_(items.slice(b, b + SUMMARIZE_BATCH_SIZE));
+    if (b + SUMMARIZE_BATCH_SIZE < items.length) Utilities.sleep(NVIDIA_RATE_LIMIT_DELAY_MS);
+  }
+}
+
+/**
+ * Run this manually to backfill summaries for Sheet rows tracked before
+ * summarization existed (or before NVIDIA_API_KEY was set) - rows added by
+ * runDailyDigest going forward are summarized automatically as part of that
+ * run. Processes rows still missing a Summary (oldest first, capped at
+ * MAX_SUMMARIES_PER_RUN) in chunks of SUMMARIZE_BATCH_SIZE, writing each
+ * chunk's results to the Sheet immediately so progress survives an
+ * interrupted run - just run it again to pick up any rows still pending.
  */
 function summarizeArticles() {
   const sheet = getArticlesSheet_();
   const data = sheet.getDataRange().getValues();
   const headers = data[0];
+  const titleIdx = headers.indexOf("Title");
   const urlIdx = headers.indexOf("Url");
   const summaryIdx = headers.indexOf("Summary");
 
-  var processed = 0;
-  for (var i = 1; i < data.length && processed < MAX_SUMMARIES_PER_RUN; i++) {
+  const pending = [];
+  for (var i = 1; i < data.length && pending.length < MAX_SUMMARIES_PER_RUN; i++) {
     if (data[i][summaryIdx]) continue; // already summarized or already marked unavailable
-
-    const rowNum = i + 1; // 1-indexed sheet row
-    const url = data[i][urlIdx];
-    const articleText = extractArticleText_(url);
-
-    var summary;
-    if (!articleText) {
-      summary = SUMMARY_NOT_AVAILABLE;
-    } else {
-      summary = summarizeWithNemotron_(articleText) || SUMMARY_NOT_AVAILABLE;
-      Utilities.sleep(NVIDIA_RATE_LIMIT_DELAY_MS);
-    }
-
-    sheet.getRange(rowNum, summaryIdx + 1).setValue(summary);
-    processed++;
+    pending.push({ rowNum: i + 1, item: { title: data[i][titleIdx], url: data[i][urlIdx] } });
   }
 
-  Logger.log("summarizeArticles: processed %s row(s).", processed);
+  if (pending.length === 0) {
+    Logger.log("summarizeArticles: nothing to do.");
+    return;
+  }
+
+  for (var b = 0; b < pending.length; b += SUMMARIZE_BATCH_SIZE) {
+    const chunk = pending.slice(b, b + SUMMARIZE_BATCH_SIZE);
+    summarizeBatch_(chunk.map(function (p) { return p.item; }));
+    chunk.forEach(function (p) {
+      sheet.getRange(p.rowNum, summaryIdx + 1).setValue(p.item.summary || SUMMARY_NOT_AVAILABLE);
+    });
+    if (b + SUMMARIZE_BATCH_SIZE < pending.length) Utilities.sleep(NVIDIA_RATE_LIMIT_DELAY_MS);
+  }
+
+  Logger.log("summarizeArticles: processed %s row(s).", pending.length);
 }
 
 // ---- Web app: Feedly-like per-keyword history ----
