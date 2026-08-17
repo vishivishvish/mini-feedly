@@ -113,10 +113,12 @@ batch call itself fails, every article in that chunk falls back to
 extraction. `summarizeInBatches_` (used by `runDailyDigest`) chunks a list
 of fresh items and paces multiple chunks with `NVIDIA_RATE_LIMIT_DELAY_MS`;
 `summarizeArticles` (run manually) does the same for any Sheet rows with a
-blank Summary cell (oldest first, capped at `MAX_SUMMARIES_PER_RUN` per
-run), writing each chunk's results to the Sheet immediately so progress
-survives an interrupted run - for backfilling rows tracked before this
-feature existed or before `NVIDIA_API_KEY` was set. Rows added by
+blank Summary cell - or, with `RETRY_FAILED_SUMMARIES` set to `true`, rows
+marked `SUMMARY_NOT_AVAILABLE` too - oldest first, capped at
+`MAX_SUMMARIES_PER_RUN` per run, writing each chunk's results to the Sheet
+immediately so progress survives an interrupted run - for backfilling rows
+tracked before this feature existed, retrying rows that failed, or
+backfilling rows from before `NVIDIA_API_KEY` was set. Rows added by
 `runDailyDigest` going forward already have a summary (or "Summary Not
 Available") by the time they're written - no separate backfill step needed
 for new articles.
