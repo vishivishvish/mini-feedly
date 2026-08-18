@@ -14,11 +14,12 @@ Keep this list current whenever a feature is added or changed.
 - **Persistent per-keyword article history** - every article ever fetched
   is appended to a Sheet (deduped by URL, per keyword), so re-running never
   creates duplicates of a story Google News re-surfaces on a later day.
-- **Web app tracker** (`doGet`) - a Feedly-style page with one section per
-  keyword, showing that keyword's history newest-first, `PAGE_SIZE` articles
-  at a time with a "See More" button to pull the next `PAGE_SIZE` from the
-  Sheet - the Sheet itself keeps everything, and paging never re-fetches
-  articles already loaded.
+- **Web app tracker** (`doGet`) - a Feedly-style page with a sidebar listing
+  every tracked keyword; clicking one shows that keyword's history
+  newest-first in the main panel, `PAGE_SIZE` articles at a time with a
+  "See More" button to pull the next `PAGE_SIZE` from the Sheet - the Sheet
+  itself keeps everything, and paging never re-fetches articles already
+  loaded.
 - **Daily 9am digest email** - plain title + real publisher URL for up to
   `MAX_ITEMS_PER_KEYWORD` articles per keyword from the previous-day-to-today
   window, one section per keyword, dark "command center" styled HTML with a
