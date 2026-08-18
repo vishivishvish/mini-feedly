@@ -1,6 +1,6 @@
 # mini-feedly
 
-A Feedly-like multi-keyword news tracker that runs entirely out of a
+A Feedly-like news tracker that runs entirely out of a
 Google Apps Script project: no external hosting, no separate login beyond
 your own Google account. Every article tracked gets a permanent home in a
 Sheet, so nothing is lost once it scrolls out of a daily email.
