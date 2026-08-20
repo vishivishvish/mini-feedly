@@ -176,7 +176,7 @@ for new articles.
 - `KEYWORDS` - array of tracked search keywords (default
   `["Artificial Intelligence", "Robotics"]`)
 - `MAX_ITEMS_PER_KEYWORD` - max articles fetched/emailed per keyword per run
-  (default 10)
+  (default 5)
 - `PAGE_SIZE` - how many articles the web app loads per keyword per "See
   More" click, and how many load on first open of a keyword (default 20)
 - `RECIPIENT_EMAIL` - who gets the daily digest email
