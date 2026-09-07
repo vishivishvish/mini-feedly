@@ -63,7 +63,12 @@ this repo directly - paste both files into the Apps Script editor,
 1. For each keyword in `KEYWORDS`: fetch Google News RSS, filter to items
    published in the previous-day-to-today UTC window, cap at
    `MAX_ITEMS_PER_KEYWORD`, and sort them newest-first by parsed `PubDate`
-   (`parseFeedItems` doesn't trust Google's feed ordering implicitly).
+   (`parseFeedItems` doesn't trust Google's feed ordering implicitly). Google
+   occasionally serves a malformed/non-RSS response (rate-limit or consent
+   page) that fails strict XML parsing - `fetchAndParseFeedWithRetry_`
+   retries once, and if it still fails, that keyword is treated as having no
+   fresh items for the day instead of aborting the whole run; every other
+   keyword still gets fetched, summarized, appended, and emailed normally.
 2. Resolve each Google News redirect link to the real publisher URL via
    Google's internal `batchexecute` RPC (no browser needed - works from a
    headless script).

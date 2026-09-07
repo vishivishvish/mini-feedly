@@ -122,8 +122,7 @@ function runDailyDigest() {
  * source, publish date, and a working link.
  */
 function fetchDigestItems(keyword, maxItems) {
-  const xml = fetchFeedXml(keyword);
-  const rawItems = parseFeedItems(xml, maxItems);
+  const rawItems = fetchAndParseFeedWithRetry_(keyword, maxItems);
   return rawItems.map(function (raw) {
     const realUrl = resolveRealUrl(raw.link);
     return {
@@ -133,6 +132,27 @@ function fetchDigestItems(keyword, maxItems) {
       url: realUrl || raw.link,
     };
   });
+}
+
+/**
+ * Google News occasionally serves a malformed/non-RSS response (rate-limit
+ * or consent page) instead of the feed, which XmlService.parse rejects with
+ * a SAXException. Retry once after a short pause; if it still fails, skip
+ * this keyword for today instead of throwing - runDailyDigest processes
+ * keywords independently, so the other keywords still get fetched,
+ * summarized, appended, and emailed.
+ */
+function fetchAndParseFeedWithRetry_(keyword, maxItems) {
+  for (var attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const xml = fetchFeedXml(keyword);
+      return parseFeedItems(xml, maxItems);
+    } catch (err) {
+      Logger.log('Feed fetch/parse failed for "%s" (attempt %s of 2): %s', keyword, attempt, err);
+      if (attempt === 1) Utilities.sleep(2000);
+    }
+  }
+  return [];
 }
 
 function fetchFeedXml(keyword) {
