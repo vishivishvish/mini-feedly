@@ -13,7 +13,7 @@ Keep this list current whenever a feature is added or changed.
   string; each one is fetched, tracked, and emailed independently.
 - **Persistent per-keyword article history** - every article ever fetched
   is appended to a Sheet (deduped by URL, per keyword), so re-running never
-  creates duplicates of a story Google News re-surfaces on a later day.
+  creates duplicates of a story that Google News re-surfaces on a later day.
 - **Web app tracker** (`doGet`) - a Feedly-style page with a sidebar listing
   every tracked keyword; clicking one shows that keyword's history
   newest-first in the main panel, `PAGE_SIZE` articles at a time with a
