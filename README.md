@@ -221,3 +221,5 @@ openable directly in a browser - useful for iterating on the email's look
 without needing to trigger a real run. Note: this predates the summary
 removal and multi-keyword sectioning, so it doesn't reflect the current
 email format.
+
+<!-- readme-grammar-pass: 2026-09-27 -->
