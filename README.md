@@ -222,4 +222,4 @@ without needing to trigger a real run. Note: this predates the summary
 removal and multi-keyword sectioning, so it doesn't reflect the current
 email format.
 
-<!-- readme-grammar-pass: 2026-09-27 -->
+<!-- readme-grammar-pass: 2026-10-05 -->
