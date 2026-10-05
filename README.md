@@ -63,7 +63,7 @@ this repo directly - paste both files into the Apps Script editor,
 1. For each keyword in `KEYWORDS`: fetch Google News RSS, filter to items
    published in the previous-day-to-today UTC window, cap at
    `MAX_ITEMS_PER_KEYWORD`, and sort them newest-first by parsed `PubDate`
-   (`parseFeedItems` doesn't trust Google's feed ordering implicitly). Google
+   (`parseFeedItems` does not implicitly trust Google's feed ordering). Google
    occasionally serves a malformed/non-RSS response (rate-limit or consent
    page) that fails strict XML parsing - `fetchAndParseFeedWithRetry_`
    retries once, and if it still fails, that keyword is treated as having no
