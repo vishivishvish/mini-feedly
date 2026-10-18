@@ -48,7 +48,7 @@
  */
 
 const KEYWORDS = ["Artificial Intelligence", "Robotics"];
-const MAX_ITEMS_PER_KEYWORD = 5;
+const MAX_ITEMS_PER_KEYWORD = 1;
 const PAGE_SIZE = 20;
 const RECIPIENT_EMAIL = "vishnu.subramanian1@mygreatlearning.com";
 
