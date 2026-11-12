@@ -50,7 +50,7 @@ Keep this list current whenever a feature is added or changed.
   card opens a small text box; whatever you type is saved via
   `saveArticleNote` to that row's `Notes` column (matched by keyword + URL)
   and shown in italic, pale-yellow text below the summary from then on.
-  Purely personal annotations - never sent to NVIDIA or included in the
+  Purely personal annotations - never sent to NVIDIA, or included in the
   digest email.
 
 ## Deployed pipeline: Google Apps Script (`mini-feedly.gs` + `Index.html`)
