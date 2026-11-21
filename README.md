@@ -7,7 +7,7 @@ Sheet, so nothing is lost once it scrolls from a daily email.
 
 ## Features
 
-Keep this list current whenever a feature is added or changed.
+Keep this list updated whenever a feature is added or changed.
 
 - **Multiple tracked keywords** - `KEYWORDS` is an array, not a single
   string; each one is fetched, tracked, and emailed independently.
